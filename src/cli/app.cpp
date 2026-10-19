@@ -37,6 +37,7 @@
 #include "typemorph/detect/detect_engine.hpp"
 #include "typemorph/pe/iat_reconstructor.hpp"
 #include "typemorph/tui/dashboard.hpp"
+#include "typemorph/delphi/delphi_analyzer.hpp"
 #ifdef _WIN32
 #include "typemorph/gui/studio_app.hpp"
 #endif
@@ -720,6 +721,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph aes-recovery <binary> [--json]\n"
                "AES Key Recovery & White-box Analyzer: recovers master keys from expanded key schedules, inverts round keys, and identifies White-box AES T-Boxes.\n";
     }
+    if (command == "delphi" || command == "dede" || command == "idr") {
+        return "Usage: typemorph delphi <binary> [--pascal] [--json]\n"
+               "Delphi / C++Builder VCL & Form Rescuer: extracts DFM resources, maps GUI events to code addresses, and reconstructs Pascal units.\n";
+    }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
                "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
@@ -737,6 +742,7 @@ std::string command_help(std::string_view command) {
            "  decompile <binary>   Structured C / Rust decompiler & struct layout reconstructor\n"
            "  csharp <binary>      .NET / CLR assembly metadata extractor & C# code decompiler\n"
            "  dotnet-clean <bin>   Advanced .NET deobfuscator (inlines proxies, decrypts strings, kills switch)\n"
+           "  delphi <binary>      Delphi / C++Builder VCL Form Rescuer & event handler mapper (IDR / DeDe)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
@@ -3836,9 +3842,35 @@ int command_aes_recovery(const Arguments& args, std::ostream& out, std::ostream&
     return 0;
 }
 
+int command_delphi(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("delphi");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph delphi: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto rep = delphi::DelphiAnalyzer::analyze(view.value());
+    if (!rep.is_delphi) {
+        err << "typemorph delphi: no Borland/Embarcadero Delphi or C++Builder signatures found in " << path << ".\n";
+        return 1;
+    }
+
+    if (args.has("pascal")) {
+        out << delphi::DelphiAnalyzer::to_pascal_source(rep);
+        return 0;
+    }
+
+    out << delphi::DelphiAnalyzer::format_report(rep);
+    return 0;
+}
 
 
-// ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
 
@@ -5098,6 +5130,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_aes_recovery(parsed.value(), out_, err_);
+    }
+    if (command == "delphi" || command == "dede" || command == "idr") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {"pascal"}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_delphi(parsed.value(), out_, err_);
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {

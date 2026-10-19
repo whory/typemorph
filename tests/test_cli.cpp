@@ -383,6 +383,12 @@ TEST_CASE("cli: studio displays help") {
     CHECK(help_res.out.find("dnSpy") != std::string::npos);
 }
 
+TEST_CASE("cli: delphi displays help") {
+    const auto help_res = invoke({"delphi", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("Delphi / C++Builder") != std::string::npos);
+}
+
 
 
 
