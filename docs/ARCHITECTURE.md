@@ -114,6 +114,18 @@ Confidence is a product of independent evidence; the CLI's
 10. **Structural Binary Diff Engine (`typemorph::diff::BinaryDiffEngine`)**:
    - Aligns and compares two binary files at the byte level with similarity scoring.
    - Cross-analyzes sections and symbols when comparing two ELF, PE, or Mach-O executable images.
+11. **C++ RTTI & Class Hierarchy Reconstructor (`typemorph::rtti::RttiAnalyzer`)**:
+   - Parses MSVC `RTTICompleteObjectLocator` (32-bit direct VAs, 64-bit RVAs relative to image base), `TypeDescriptor` (`.?AV...@@`), `ClassHierarchyDescriptor`, and `BaseClassArray` (with inheritance offsets `mdisp`).
+   - Demangles MSVC type names into idiomatic C++ namespaces (`.?AVDog@Zoo@@` -> `Zoo::Dog`).
+   - Reconstructs virtual function tables (`vftable_va`), locator VAs, and slot-indexed method tables.
+   - Supports Itanium ABI `_ZTV` / `_ZTI` symbol demangling and method extraction.
+   - Emits compilable C++ class definitions with virtual destructors and method signatures via `to_cpp_header()`.
+12. **Binary Hardening & Security Inspector (`typemorph::security::SecurityAnalyzer`)**:
+   - Hardening mitigation checks: ASLR, HighEntropyVA, DEP/NX, Control Flow Guard, CET Shadow Stack, SafeSEH, Authenticode digital signatures, PIE, RELRO, Stack Canary.
+   - Section anomaly detection: $W \oplus X$ violations (writable & executable sections), memory expansion ratios ($\text{virtual\_size} / \text{raw\_size} \ge 3.0$), and unmapped raw executable sections.
+   - Packer & protector signatures: UPX, ASPack, PECompact, VMProtect, Themida, Enigma, PyInstaller.
+   - Overlay inspection: detects trailing bytes beyond the last physical section, calculates size, offset, and Shannon entropy.
+   - Anti-analysis heuristics: PEB `BeingDebugged` checks (`fs:[0x30]`, `gs:[0x60]`), timing checks (`RDTSC`/`RDTSCP`), and TLS callbacks.
 
 ## Emitters
 
@@ -129,11 +141,11 @@ Confidence is a product of independent evidence; the CLI's
 - **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binary Ninja API v3/v4 plugin)
 - **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
 - Connects either standalone or through `typemorph serve --stdio` JSON-RPC.
-- Automatically renames subroutines from demangled Rust symbols, populates structure definitions for Rust trait vtables, adds comments for string slice pairs and stack strings, labels VM dispatcher handlers, marks cryptographic constants, maps CFF state dispatchers, and annotates resolved API hashes and opaque predicates.
+- Automatically renames subroutines from demangled Rust symbols, populates structure definitions for Rust trait vtables, adds comments for string slice pairs and stack strings, labels VM dispatcher handlers, marks cryptographic constants, maps CFF state dispatchers, annotates resolved API hashes and opaque predicates, labels C++ RTTI vftables and methods, and posts security hardening reports.
 
 ## CLI / JSON-RPC
 
-`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `apihash`, `opaque`, `entropy`, `sig`, `crypto`, `diff`, `serve`), builds engine options, and
+`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `apihash`, `opaque`, `rtti`, `checksec`, `entropy`, `sig`, `crypto`, `diff`, `serve`), builds engine options, and
 delegates to `KaitaiEmitter`/`RustEmitter`/etc. `serve --stdio` performs line-delimited
 JSON-RPC 2.0 using the same helpers, so protocol and CLI behavior cannot drift.
 JSON is produced by the built-in `JsonValue` writer (or nlohmann/json when

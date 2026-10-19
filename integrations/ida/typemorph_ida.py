@@ -264,6 +264,64 @@ class TypeMorphIdaSync:
                 tag = "ALWAYS TAKEN" if outcome == "always_true" else "NEVER TAKEN (DEAD)"
                 ida_bytes.set_cmt(ea, f"[TypeMorph Opaque Predicate] {disasm} => {tag}\n{rationale}", True)
 
+    def sync_rtti(self) -> None:
+        """Reconstructs C++ polymorphic classes, inheritance hierarchy, and vftables in IDA."""
+        print(f"[TypeMorph IDA] Reconstructing C++ RTTI in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "rtti", self.target_path)
+        if not data:
+            return
+        classes = data.get("classes", [])
+        print(f"[TypeMorph IDA] Found {len(classes)} polymorphic C++ class(es)")
+        if IN_IDA:
+            for cls in classes:
+                name = cls.get("name", "UnknownClass").replace("::", "__")
+                vf_va = cls.get("vftable_va", 0)
+                loc_va = cls.get("locator_va", 0)
+                bases = cls.get("base_classes", [])
+                methods = cls.get("methods", [])
+
+                if vf_va:
+                    ida_name.set_name(vf_va, f"vftable_{name}", ida_name.SN_FORCE)
+                    base_str = ", ".join(f"{b.get('name')} (+{b.get('offset', 0)})" for b in bases)
+                    cmt = f"[TypeMorph RTTI] class {name}"
+                    if base_str:
+                        cmt += f" : {base_str}"
+                    ida_bytes.set_cmt(vf_va, cmt, True)
+
+                if loc_va:
+                    ida_name.set_name(loc_va, f"rtti_locator_{name}", ida_name.SN_FORCE)
+
+                for m in methods:
+                    m_va = m.get("virtual_address", 0)
+                    slot = m.get("slot", 0)
+                    if m_va:
+                        ida_name.set_name(m_va, f"{name}__slot{slot}", ida_name.SN_NOWARN)
+                        ida_bytes.set_cmt(m_va, f"[TypeMorph RTTI] {name}::slot_{slot}", False)
+
+    def sync_checksec(self) -> None:
+        """Inspects binary hardening mitigations and packers in IDA."""
+        print(f"[TypeMorph IDA] Inspecting security mitigations (checksec) in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "checksec", self.target_path)
+        if not data:
+            return
+        mits = data.get("mitigations", {})
+        packers = data.get("packers", [])
+        anomalies = data.get("section_anomalies", [])
+        anti = data.get("anti_analysis_indicators", [])
+        print(f"[TypeMorph IDA] Hardening: ASLR={mits.get('aslr')}, DEP={mits.get('dep_nx')}, CFG={mits.get('cfg')}")
+        if IN_IDA:
+            ep = data.get("entry_point", 0)
+            if ep:
+                cmt = "[TypeMorph checksec Security Report]\n"
+                cmt += f"  Mitigations: ASLR={mits.get('aslr')}, DEP={mits.get('dep_nx')}, CFG={mits.get('cfg')}, SafeSEH={mits.get('safe_seh')}\n"
+                if packers:
+                    cmt += f"  Packers: {', '.join(p.get('name') for p in packers)}\n"
+                if anomalies:
+                    cmt += f"  Section Anomalies: {len(anomalies)} detected\n"
+                if anti:
+                    cmt += f"  Anti-Analysis: {', '.join(anti)}\n"
+                ida_bytes.set_cmt(ep, cmt, True)
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -272,6 +330,8 @@ class TypeMorphIdaSync:
         self.sync_cff()
         self.sync_apihash()
         self.sync_opaque()
+        self.sync_rtti()
+        self.sync_checksec()
         print("[TypeMorph IDA] Synchronization complete!")
 
 

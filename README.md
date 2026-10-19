@@ -32,6 +32,8 @@ Ghidra/IDA/editor integration.
   size deltas (`Δsize / Δcount` = element stride), finds invariant magic with
   bitwise masking, tags monotonic sequences as timestamps/IDs, and infers **bitfield flag sets**
   via power-of-two and bit-gap analysis.
+- **C++ RTTI & Class Hierarchy Reconstructor** — reconstructs polymorphic C++ class names, CompleteObjectLocator tables, virtual method slot lists, and inheritance hierarchies from MSVC and Itanium ABI binaries, with direct export to compilable C++ headers (`typemorph rtti --format=cpp`).
+- **Binary Hardening & Security Inspector (`checksec`)** — audits binary protections (ASLR, HighEntropyVA, DEP/NX, Control Flow Guard, CET Shadow Stack, SafeSEH, Authenticode signatures, PIE, RELRO, Stack Canary), detects common packers (UPX, ASPack, PECompact, VMProtect, Themida, Enigma, PyInstaller), flags section anomalies ($W \oplus X$ violations, high expansion ratios), overlay data, and anti-analysis evasion tactics (`typemorph checksec`).
 - **DeRust** — validates Rust fat pointers `(ptr, len)` against `.rodata`,
   reconstructs `[drop_in_place, size, align, methods...]` trait vtables, and
   demangles both legacy `_ZN...E` and modern `_Rv0` symbols.
@@ -51,7 +53,7 @@ Ghidra/IDA/editor integration.
   * **IDA Pro**: `integrations/ida/typemorph_ida.py` (IDAPython for IDA 7.x/8.x/9.x)
   * **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binja API v3/v4 plugin)
   * **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
-- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `apihash`, `opaque`, `entropy`, `sig`, `crypto`, `diff`,
+- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `apihash`, `opaque`, `rtti`, `checksec`, `entropy`, `sig`, `crypto`, `diff`,
   `serve`) and an ANSI terminal dashboard with hex/entropy heat map, collapsible AST, and live preview (`e` Kaitai, `K` C++, `R` Rust, `s`/`w` save).
 - **Zero required third-party dependencies** — the analysis core, executable
   parser, JSON-RPC, TUI, and test harness are self-contained, so air-gapped RE
@@ -146,6 +148,13 @@ typemorph apihash malware.bin
 # Detect invariant opaque predicates and dead branches
 typemorph opaque obfuscated.exe
 
+# Reconstruct C++ RTTI class hierarchy, vftables, and emit C++ header
+typemorph rtti target.exe
+typemorph rtti target.exe --format=cpp
+
+# Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
+typemorph checksec target.exe
+
 # Terminal ASCII Shannon entropy visualizer & packed section detector
 typemorph entropy sample.bin --block-size=64
 
@@ -191,7 +200,7 @@ python integrations/r2/typemorph_r2.py path/to/binary
 }}
 ```
 
-Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `cff`, `bitfield`, `apihash`, `opaque`, `entropy`, `sig`, `crypto`, `diff`
+Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `cff`, `bitfield`, `apihash`, `opaque`, `rtti`, `checksec`, `entropy`, `sig`, `crypto`, `diff`
 (also namespaced as `typemorph.*`). Notifications (requests without `id`) are
 executed without a reply, per JSON-RPC 2.0.
 

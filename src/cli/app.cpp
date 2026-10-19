@@ -23,6 +23,8 @@
 #include "typemorph/emitter/kaitai_emitter.hpp"
 #include "typemorph/emitter/rust_emitter.hpp"
 #include "typemorph/infer/diff_engine.hpp"
+#include "typemorph/rtti/rtti_analyzer.hpp"
+#include "typemorph/security/security_analyzer.hpp"
 #include "typemorph/tui/dashboard.hpp"
 
 #include <algorithm>
@@ -640,6 +642,14 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph opaque <binary> [--json]\n"
                "Scans binary for x86/x64 invariant opaque predicates and dead branches.\n";
     }
+    if (command == "rtti") {
+        return "Usage: typemorph rtti <binary> [--format=cpp|json] [--json]\n"
+               "Reconstruct C++ polymorphic class names, inheritance hierarchy, and vftables from RTTI.\n";
+    }
+    if (command == "checksec") {
+        return "Usage: typemorph checksec <binary> [--json]\n"
+               "Inspect binary security mitigations (ASLR, DEP, CFG, SafeSEH, CET), packers, and section anomalies.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -656,6 +666,8 @@ std::string command_help(std::string_view command) {
            "  cff <binary>         Control flow unflattening & CFG recovery\n"
            "  apihash <file|hash>  Resolve API hashes & scan for hidden imports\n"
            "  opaque <binary>      Detect invariant opaque predicates & dead code\n"
+           "  rtti <binary>        Reconstruct C++ RTTI classes & vftables\n"
+           "  checksec <binary>    Inspect binary hardening, packers & anomalies\n"
            "  entropy <file>       Shannon entropy graph & high-density zones\n"
            "  sig <binary>         Generate YARA rule from invariants & strings\n"
            "  crypto <file>        Detect cryptographic & hashing constants\n"
@@ -2052,6 +2064,278 @@ int command_opaque(const Arguments& args, std::ostream& out, std::ostream& err) 
     return 0;
 }
 
+JsonValue rtti_classes_to_json(const std::string& path, const std::vector<rtti::RttiClass>& classes) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["count"] = JsonValue(static_cast<std::int64_t>(classes.size()));
+    JsonValue arr = JsonValue::array();
+    for (const auto& cls : classes) {
+        JsonValue c = JsonValue::object();
+        c["name"] = JsonValue(cls.name);
+        c["mangled_name"] = JsonValue(cls.mangled_name);
+        c["vftable_va"] = JsonValue(cls.vftable_va);
+        c["locator_va"] = JsonValue(cls.locator_va);
+        c["confidence"] = JsonValue(cls.confidence);
+
+        JsonValue bases = JsonValue::array();
+        for (const auto& b : cls.base_classes) {
+            JsonValue bj = JsonValue::object();
+            bj["name"] = JsonValue(b.name);
+            bj["mangled_name"] = JsonValue(b.mangled_name);
+            bj["offset"] = JsonValue(static_cast<std::int64_t>(b.offset));
+            bj["attributes"] = JsonValue(static_cast<std::uint64_t>(b.attributes));
+            bases.push(std::move(bj));
+        }
+        c["base_classes"] = std::move(bases);
+
+        JsonValue methods = JsonValue::array();
+        for (const auto& m : cls.methods) {
+            JsonValue mj = JsonValue::object();
+            mj["slot"] = JsonValue(static_cast<std::uint64_t>(m.slot));
+            mj["virtual_address"] = JsonValue(m.virtual_address);
+            mj["name"] = JsonValue(m.name);
+            methods.push(std::move(mj));
+        }
+        c["methods"] = std::move(methods);
+        arr.push(std::move(c));
+    }
+    doc["classes"] = std::move(arr);
+    return doc;
+}
+
+JsonValue security_report_to_json(const std::string& path, const security::SecurityReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["format"] = JsonValue(std::string(core::to_string(rep.format)));
+    doc["bits"] = JsonValue(static_cast<std::uint64_t>(rep.bits));
+    doc["entry_point"] = JsonValue(rep.entry_point);
+    doc["entry_point_outside_code"] = JsonValue(rep.entry_point_outside_code);
+    doc["has_tls_callbacks"] = JsonValue(rep.has_tls_callbacks);
+
+    JsonValue mits = JsonValue::object();
+    mits["aslr"] = JsonValue(rep.mitigations.aslr);
+    mits["high_entropy_va"] = JsonValue(rep.mitigations.high_entropy_va);
+    mits["dep_nx"] = JsonValue(rep.mitigations.dep_nx);
+    mits["cfg"] = JsonValue(rep.mitigations.cfg);
+    mits["cet_shadow_stack"] = JsonValue(rep.mitigations.cet_shadow_stack);
+    mits["safe_seh"] = JsonValue(rep.mitigations.safe_seh);
+    mits["isolated"] = JsonValue(rep.mitigations.isolated);
+    mits["signed_binary"] = JsonValue(rep.mitigations.signed_binary);
+    mits["pie"] = JsonValue(rep.mitigations.pie);
+    mits["relro"] = JsonValue(rep.mitigations.relro);
+    mits["stack_canary"] = JsonValue(rep.mitigations.stack_canary);
+    doc["mitigations"] = std::move(mits);
+
+    JsonValue packers = JsonValue::array();
+    for (const auto& p : rep.packers) {
+        JsonValue pj = JsonValue::object();
+        pj["name"] = JsonValue(p.name);
+        pj["confidence"] = JsonValue(p.confidence);
+        pj["rationale"] = JsonValue(p.rationale);
+        packers.push(std::move(pj));
+    }
+    doc["packers"] = std::move(packers);
+
+    JsonValue anomalies = JsonValue::array();
+    for (const auto& a : rep.section_anomalies) {
+        JsonValue aj = JsonValue::object();
+        aj["name"] = JsonValue(a.name);
+        aj["virtual_address"] = JsonValue(a.virtual_address);
+        aj["virtual_size"] = JsonValue(a.virtual_size);
+        aj["file_offset"] = JsonValue(a.file_offset);
+        aj["file_size"] = JsonValue(a.file_size);
+        aj["is_wx"] = JsonValue(a.is_wx);
+        aj["is_empty_raw"] = JsonValue(a.is_empty_raw);
+        aj["expansion_ratio"] = JsonValue(a.expansion_ratio);
+        aj["note"] = JsonValue(a.note);
+        anomalies.push(std::move(aj));
+    }
+    doc["section_anomalies"] = std::move(anomalies);
+
+    JsonValue overlay = JsonValue::object();
+    overlay["present"] = JsonValue(rep.overlay.present);
+    overlay["offset"] = JsonValue(rep.overlay.offset);
+    overlay["size"] = JsonValue(rep.overlay.size);
+    overlay["entropy"] = JsonValue(rep.overlay.entropy);
+    doc["overlay"] = std::move(overlay);
+
+    JsonValue anti = JsonValue::array();
+    for (const auto& ind : rep.anti_analysis_indicators) {
+        anti.push(JsonValue(ind));
+    }
+    doc["anti_analysis_indicators"] = std::move(anti);
+
+    return doc;
+}
+
+int command_rtti(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("rtti");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph rtti: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    rtti::RttiAnalyzer analyzer;
+    auto classes = analyzer.analyze_view(view.value());
+
+    std::string fmt = args.get_or("format", "");
+    if (args.has("json") || fmt == "json") {
+        auto doc = rtti_classes_to_json(path, classes);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    if (fmt == "cpp") {
+        out << rtti::RttiAnalyzer::to_cpp_header(classes) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph C++ RTTI & Class Hierarchy Reconstructor\n"
+        << "  Target: " << path << "\n"
+        << "  Polymorphic Classes Detected: " << classes.size() << "\n\n";
+
+    if (classes.empty()) {
+        out << "  No C++ RTTI CompleteObjectLocator or TypeDescriptor entries found.\n";
+        return 0;
+    }
+
+    for (std::size_t i = 0; i < classes.size(); ++i) {
+        const auto& cls = classes[i];
+        char vf_buf[32], loc_buf[32];
+        std::snprintf(vf_buf, sizeof(vf_buf), "0x%llx", static_cast<unsigned long long>(cls.vftable_va));
+        std::snprintf(loc_buf, sizeof(loc_buf), "0x%llx", static_cast<unsigned long long>(cls.locator_va));
+
+        out << "[" << (i + 1) << "] class " << cls.name;
+        if (!cls.base_classes.empty()) {
+            out << " : ";
+            for (std::size_t b = 0; b < cls.base_classes.size(); ++b) {
+                if (b > 0) out << ", ";
+                out << "public " << cls.base_classes[b].name;
+            }
+        }
+        out << "\n"
+            << "     vftable: " << vf_buf << " | locator: " << loc_buf
+            << " | confidence: " << std::fixed << std::setprecision(1) << (cls.confidence * 100.0) << "%\n";
+
+        if (!cls.base_classes.empty()) {
+            out << "     Base Classes:\n";
+            for (const auto& b : cls.base_classes) {
+                out << "       - " << b.name << " (offset " << b.offset << ")\n";
+            }
+        }
+        if (!cls.methods.empty()) {
+            out << "     Virtual Method Slots (" << cls.methods.size() << "):\n";
+            for (const auto& m : cls.methods) {
+                char m_buf[32];
+                std::snprintf(m_buf, sizeof(m_buf), "0x%llx", static_cast<unsigned long long>(m.virtual_address));
+                out << "       [" << m.slot << "] " << m_buf << ": " << m.name << "\n";
+            }
+        }
+        out << "\n";
+    }
+
+    out << "(Tip: Use --format=cpp to generate C++ header definitions)\n";
+    return 0;
+}
+
+int command_checksec(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("checksec");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph checksec: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    security::SecurityAnalyzer analyzer;
+    auto report = analyzer.analyze_view(view.value());
+
+    if (args.has("json")) {
+        auto doc = security_report_to_json(path, report);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    char ep_buf[32];
+    std::snprintf(ep_buf, sizeof(ep_buf), "0x%llx", static_cast<unsigned long long>(report.entry_point));
+
+    out << "TypeMorph Binary Hardening & Security Inspector (checksec)\n"
+        << "  Target:      " << path << " (" << core::to_string(report.format) << ", " << report.bits << "-bit)\n"
+        << "  Entry Point: " << ep_buf
+        << (report.entry_point_outside_code ? " [WARNING: Outside code section!]" : " [Code section]") << "\n\n";
+
+    out << "Mitigations & Protections:\n";
+    const auto& m = report.mitigations;
+    out << "  ASLR:                  " << (m.aslr ? "Enabled" : "Disabled") << "\n";
+    out << "  High-Entropy VA:       " << (m.high_entropy_va ? "Enabled" : "Disabled") << "\n";
+    out << "  DEP / NX:              " << (m.dep_nx ? "Enabled" : "Disabled") << "\n";
+    out << "  Control Flow Guard:    " << (m.cfg ? "Enabled" : "Disabled") << "\n";
+    out << "  CET Shadow Stack:      " << (m.cet_shadow_stack ? "Enabled" : "Disabled") << "\n";
+    if (report.format == core::ImageFormat::pe) {
+        out << "  SafeSEH:               " << (m.safe_seh ? "Enabled" : "Disabled / N/A") << "\n";
+        out << "  Authenticode Signed:   " << (m.signed_binary ? "Signed" : "No signature") << "\n";
+        out << "  TLS Callbacks:         " << (report.has_tls_callbacks ? "Present" : "None") << "\n";
+    } else {
+        out << "  PIE:                   " << (m.pie ? "Enabled" : "Disabled") << "\n";
+        out << "  RELRO:                 " << (m.relro ? "Enabled" : "Disabled") << "\n";
+        out << "  Stack Canary:          " << (m.stack_canary ? "Found" : "Not detected") << "\n";
+    }
+
+    out << "\nPackers & Protections Detected:\n";
+    if (report.packers.empty()) {
+        out << "  None detected (standard compiler output)\n";
+    } else {
+        for (const auto& p : report.packers) {
+            out << "  - " << p.name << " (confidence "
+                << std::fixed << std::setprecision(1) << (p.confidence * 100.0) << "%): "
+                << p.rationale << "\n";
+        }
+    }
+
+    out << "\nSection Anomalies:\n";
+    if (report.section_anomalies.empty()) {
+        out << "  None (W^X respected, normal section ratios)\n";
+    } else {
+        for (const auto& a : report.section_anomalies) {
+            out << "  - Section '" << a.name << "': " << a.note;
+            if (a.is_wx) out << " [W^X VIOLATION]";
+            out << "\n";
+        }
+    }
+
+    out << "\nOverlay Data:\n";
+    if (!report.overlay.present) {
+        out << "  None\n";
+    } else {
+        char ov_buf[32];
+        std::snprintf(ov_buf, sizeof(ov_buf), "0x%llx", static_cast<unsigned long long>(report.overlay.offset));
+        out << "  Present at offset " << ov_buf << " (" << report.overlay.size << " bytes, entropy: "
+            << std::fixed << std::setprecision(2) << report.overlay.entropy << " - "
+            << core::entropy_label(report.overlay.entropy) << ")\n";
+    }
+
+    out << "\nAnti-Analysis & Evasion Indicators:\n";
+    if (report.anti_analysis_indicators.empty()) {
+        out << "  None detected\n";
+    } else {
+        for (const auto& ind : report.anti_analysis_indicators) {
+            out << "  - " << ind << "\n";
+        }
+    }
+
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -2140,6 +2424,8 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("bitfield"));
         capabilities.push(JsonValue("apihash"));
         capabilities.push(JsonValue("opaque"));
+        capabilities.push(JsonValue("rtti"));
+        capabilities.push(JsonValue("checksec"));
         result["capabilities"] = std::move(capabilities);
         return result;
     }
@@ -2670,6 +2956,29 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         doc["predicates"] = std::move(array);
         return doc;
     }
+    if (method == "rtti" || method == "typemorph.rtti") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        rtti::RttiAnalyzer analyzer;
+        auto classes = analyzer.analyze_view(view_result.value());
+        auto doc = rtti_classes_to_json(file.value(), classes);
+        auto fmt = json_string_field(params, "format", false).value_or("");
+        if (fmt == "cpp") {
+            doc["cpp_header"] = JsonValue(rtti::RttiAnalyzer::to_cpp_header(classes));
+        }
+        return doc;
+    }
+    if (method == "checksec" || method == "typemorph.checksec") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        security::SecurityAnalyzer analyzer;
+        auto report = analyzer.analyze_view(view_result.value());
+        return security_report_to_json(file.value(), report);
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -2909,6 +3218,26 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_opaque(parsed.value(), out_, err_);
+    }
+    if (command == "rtti") {
+        auto parsed = parse_arguments(
+            rest, {"format"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_rtti(parsed.value(), out_, err_);
+    }
+    if (command == "checksec") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_checksec(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

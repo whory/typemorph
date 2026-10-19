@@ -228,6 +228,55 @@ class R2Sync:
             tag = "ALWAYS TAKEN" if outcome == "always_true" else "DEAD (NEVER TAKEN)"
             self.cmd(f'CC "[TypeMorph Opaque Predicate] {disasm} => {tag}" @ {offset}')
 
+    def sync_rtti(self) -> None:
+        print(f"[TypeMorph R2] Reconstructing C++ RTTI in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "rtti", self.target_path)
+        if not data:
+            return
+        classes = data.get("classes", [])
+        print(f"[TypeMorph R2] Found {len(classes)} polymorphic C++ class(es)...")
+        for cls in classes:
+            name = cls.get("name", "UnknownClass").replace("::", "__")
+            vf_va = cls.get("vftable_va", 0)
+            loc_va = cls.get("locator_va", 0)
+            bases = cls.get("base_classes", [])
+            methods = cls.get("methods", [])
+
+            if vf_va:
+                self.cmd(f"f vftable.{name} = {vf_va}")
+                base_str = ", ".join(f"{b.get('name')} (+{b.get('offset', 0)})" for b in bases)
+                cmt = f"[TypeMorph RTTI] class {name}"
+                if base_str:
+                    cmt += f" : {base_str}"
+                self.cmd(f'CC "{cmt}" @ {vf_va}')
+
+            if loc_va:
+                self.cmd(f"f rtti.locator.{name} = {loc_va}")
+
+            for m in methods:
+                m_va = m.get("virtual_address", 0)
+                slot = m.get("slot", 0)
+                if m_va:
+                    self.cmd(f"f {name}.slot_{slot} = {m_va}")
+                    self.cmd(f'CC "[TypeMorph RTTI] {name}::slot_{slot}" @ {m_va}')
+
+    def sync_checksec(self) -> None:
+        print(f"[TypeMorph R2] Inspecting security mitigations (checksec) in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "checksec", self.target_path)
+        if not data:
+            return
+        mits = data.get("mitigations", {})
+        packers = data.get("packers", [])
+        anomalies = data.get("section_anomalies", [])
+        anti = data.get("anti_analysis_indicators", [])
+        print(f"[TypeMorph R2] Hardening: ASLR={mits.get('aslr')}, DEP={mits.get('dep_nx')}, CFG={mits.get('cfg')}")
+        ep = data.get("entry_point", 0)
+        if ep:
+            cmt = f"[TypeMorph checksec] ASLR={mits.get('aslr')}, DEP={mits.get('dep_nx')}, CFG={mits.get('cfg')}, SafeSEH={mits.get('safe_seh')}"
+            if packers:
+                cmt += f" | Packers: {', '.join(p.get('name') for p in packers)}"
+            self.cmd(f'CC "{cmt}" @ {ep}')
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -236,6 +285,8 @@ class R2Sync:
         self.sync_cff()
         self.sync_apihash()
         self.sync_opaque()
+        self.sync_rtti()
+        self.sync_checksec()
         print("[TypeMorph R2] Synchronization complete!")
 
 
