@@ -882,6 +882,26 @@ int command_inspect(const Arguments& args, std::ostream& out, std::ostream& err)
         return 1;
     }
 
+    if (args.has("html")) {
+        // Read the dnSpy / dotPeek UI template and output it or write to file
+        const std::string template_path = "C:/Users/dev_null/.gemini/antigravity/brain/57049001-375c-4ba4-9c66-51b42c51d0e2/dnspy_studio.html";
+        std::ifstream file(template_path);
+        if (file) {
+            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            if (auto out_path = args.get("out")) {
+                auto wr = write_file(*out_path, content);
+                if (!wr) {
+                    err << "TypeMorph: failed to write HTML dashboard to " << *out_path << '\n';
+                    return 1;
+                }
+                out << "TypeMorph dnSpy Studio UI exported to: " << *out_path << "\n";
+                return 0;
+            }
+            out << content;
+            return 0;
+        }
+    }
+
     if (args.has("json")) {
         JsonValue document = inference_to_json(result.value());
         document["kaitai"] = JsonValue(std::move(kaitai).value());
@@ -4660,7 +4680,7 @@ int Application::run(std::span<const std::string_view> args) {
     }
     if (command == "inspect") {
         auto parsed = parse_arguments(
-            rest, {"width", "height"}, {"render-once", "no-tui"}, 0, 1);
+            rest, {"width", "height", "out"}, {"render-once", "no-tui", "html"}, 0, 1);
         if (!parsed) {
             err_ << usage_error(parsed.error().message) << '\n';
             return 2;
