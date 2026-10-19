@@ -419,6 +419,13 @@ TEST_CASE("cli: vmslayer displays help") {
     CHECK(help_res.out.find("VMDragonSlayer") != std::string::npos);
 }
 
+TEST_CASE("cli: unpack displays help") {
+    const auto help_res = invoke({"unpack", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("unipacker") != std::string::npos);
+}
+
+
 
 
 

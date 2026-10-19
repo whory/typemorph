@@ -42,6 +42,7 @@
 #include "typemorph/vb/vb_analyzer.hpp"
 #include "typemorph/autoit/autoit_decompiler.hpp"
 #include "typemorph/unpack/vfs_extractor.hpp"
+#include "typemorph/unpack/universal_unpacker.hpp"
 #include "typemorph/vm/vm_analyzer.hpp"
 #ifdef _WIN32
 #include "typemorph/gui/studio_app.hpp"
@@ -750,6 +751,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph vmslayer <binary> [--json]\n"
                "Advanced Virtualization & VM Handler Profiler (VMDragonSlayer / NoVmp / Magicmida): profiles VM entry points, dispatchers, and classifies VM handlers.\n";
     }
+    if (command == "unpack" || command == "unipacker" || command == "upx-fix") {
+        return "Usage: typemorph unpack <binary> [--out=unpacked.exe] [--json]\n"
+               "Universal PE Unpacker & Header Recovery (unipacker / UPX / ASPack / PECompact): restores original PE headers and recovers OEP.\n";
+    }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
                "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
@@ -773,6 +778,7 @@ std::string command_help(std::string_view command) {
            "  autoit <binary>      AutoIt v3 Script Extractor & token decompiler (Exe2Aut)\n"
            "  vfs-extract <bin>    Virtual Filesystem Extractor (Spoon Studio, Enigma Virtual Box, BoxedApp)\n"
            "  vmslayer <binary>    Advanced VM Profiler & handler classifier (VMProtect / Themida / NoVmp)\n"
+           "  unpack <binary>      Universal PE Unpacker & Header Recovery (unipacker / UPX / ASPack)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
@@ -4068,6 +4074,65 @@ int command_vmslayer(const Arguments& args, std::ostream& out, std::ostream& err
     return 0;
 }
 
+int command_unpack(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("unpack");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph unpack: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto target = unpack::UniversalUnpacker::detect(view.value());
+    if (!target.is_packed) {
+        err << "typemorph unpack: no known packer signatures found in " << path << ".\n";
+        return 1;
+    }
+
+    if (args.has("out")) {
+        auto res = unpack::UniversalUnpacker::unpack(view.value());
+        if (!res.success) {
+            err << "typemorph unpack: failed to unpack - " << res.log << "\n";
+            return 1;
+        }
+        const std::string out_path = args.get("out").value();
+        auto written = write_binary_file(out_path, res.unpacked_payload);
+        if (!written) {
+            err << "typemorph unpack: cannot write to " << out_path << ".\n";
+            return 1;
+        }
+        out << "typemorph unpack: unpacked binary successfully written to " << out_path << "\n";
+        out << res.log;
+        return 0;
+    }
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["is_packed"] = JsonValue(target.is_packed);
+        doc["packer_name"] = JsonValue(target.packer_name);
+        doc["version"] = JsonValue(target.version);
+        doc["stub_entry_va"] = JsonValue(target.stub_entry_va);
+        doc["recovered_oep_va"] = JsonValue(target.recovered_oep_va);
+        doc["original_image_base"] = JsonValue(target.original_image_base);
+        doc["has_scrambled_headers"] = JsonValue(target.has_scrambled_headers);
+        JsonValue warnings = JsonValue::array();
+        for (const auto& w : target.warnings) {
+            warnings.push(JsonValue(w));
+        }
+        doc["warnings"] = std::move(warnings);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << unpack::UniversalUnpacker::format_report(target);
+    return 0;
+}
+
+
 
 
 // JSON-RPC
@@ -4965,6 +5030,28 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         doc["vm_entries"] = std::move(entries);
         return doc;
     }
+    if (method == "unpack" || method == "typemorph.unpack" ||
+        method == "unipacker" || method == "typemorph.unipacker") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto target = unpack::UniversalUnpacker::detect(view_result.value());
+        JsonValue doc = JsonValue::object();
+        doc["is_packed"] = JsonValue(target.is_packed);
+        doc["packer_name"] = JsonValue(target.packer_name);
+        doc["version"] = JsonValue(target.version);
+        doc["stub_entry_va"] = JsonValue(target.stub_entry_va);
+        doc["recovered_oep_va"] = JsonValue(target.recovered_oep_va);
+        doc["original_image_base"] = JsonValue(target.original_image_base);
+        doc["has_scrambled_headers"] = JsonValue(target.has_scrambled_headers);
+        JsonValue warnings = JsonValue::array();
+        for (const auto& w : target.warnings) {
+            warnings.push(JsonValue(w));
+        }
+        doc["warnings"] = std::move(warnings);
+        return doc;
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -5424,6 +5511,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_vmslayer(parsed.value(), out_, err_);
+    }
+    if (command == "unpack" || command == "unipacker" || command == "upx-fix") {
+        auto parsed = parse_arguments(
+            rest, {"out"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_unpack(parsed.value(), out_, err_);
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {
