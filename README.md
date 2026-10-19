@@ -204,6 +204,10 @@ typemorph lua script.luac
 typemorph lua script.luac --disasm
 typemorph lua script.luac --out=decompiled.lua
 
+# AES Key Recovery & White-box Analyzer: inverts key schedules & identifies T-Boxes
+typemorph aes-recovery target.exe
+typemorph aes-recovery target.exe --json
+
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe
 

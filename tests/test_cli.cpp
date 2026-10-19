@@ -367,6 +367,16 @@ TEST_CASE("cli: lua decompiles or displays help") {
     CHECK(res.err.find("not a valid Lua") != std::string::npos);
 }
 
+TEST_CASE("cli: aes-recovery analyzes binary for AES artifacts") {
+    const auto help_res = invoke({"aes-recovery", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("AES Key Recovery") != std::string::npos);
+
+    const auto res = invoke({"aes-recovery", fixture_path("rust_sample.elf")});
+    CHECK_EQ(res.exit_code, 0);
+    CHECK(res.out.find("AES Key Recovery") != std::string::npos);
+}
+
 
 
 

@@ -6,6 +6,7 @@
 #include "typemorph/core/executable.hpp"
 #include "typemorph/core/result.hpp"
 #include "typemorph/crypto/crypto_scanner.hpp"
+#include "typemorph/crypto/aes_recovery.hpp"
 #include "typemorph/deobf/api_hash_resolver.hpp"
 #include "typemorph/deobf/cff_reconstructor.hpp"
 #include "typemorph/deobf/devirtualizer.hpp"
@@ -712,6 +713,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph lua <bytecode.luac> [--disasm] [--out=decompiled.lua] [--json]\n"
                "Lua & LuaJIT Bytecode Decompiler: decompiles Lua 5.1/5.2/5.3/5.4 and LuaJIT 2.0/2.1 chunks.\n";
     }
+    if (command == "aes-recovery" || command == "time-aes" || command == "aesfind") {
+        return "Usage: typemorph aes-recovery <binary> [--json]\n"
+               "AES Key Recovery & White-box Analyzer: recovers master keys from expanded key schedules, inverts round keys, and identifies White-box AES T-Boxes.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -725,6 +730,7 @@ std::string command_help(std::string_view command) {
            "  csharp <binary>      .NET / CLR assembly metadata extractor & C# code decompiler\n"
            "  dotnet-clean <bin>   Advanced .NET deobfuscator (inlines proxies, decrypts strings, kills switch)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
+           "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
            "  fixiat <dump.exe>    Reconstruct PE Import Address Table (IAT) & rebuild import directory\n"
            "  hybrid <binary>      Infer an embedded executable section\n"
@@ -3797,6 +3803,31 @@ int command_lua(const Arguments& args, std::ostream& out, std::ostream& err) {
     return 0;
 }
 
+int command_aes_recovery(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("aes-recovery");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph aes-recovery: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    crypto::AesKeyRecoveryEngine engine;
+    auto rep = engine.analyze(view.value());
+
+    if (args.has("json")) {
+        out << crypto::AesKeyRecoveryEngine::to_json(rep) << '\n';
+        return 0;
+    }
+
+    out << crypto::AesKeyRecoveryEngine::to_text_report(rep) << '\n';
+    return 0;
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -3896,6 +3927,7 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("dotnet"));
         capabilities.push(JsonValue("dotnet-clean"));
         capabilities.push(JsonValue("lua"));
+        capabilities.push(JsonValue("aes-recovery"));
         capabilities.push(JsonValue("decompile"));
         result["capabilities"] = std::move(capabilities);
         return result;
@@ -4521,6 +4553,18 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         auto rep = decompiler.decompile(view_result.value());
         return lua_report_to_json(file.value(), rep);
     }
+    if (method == "aes-recovery" || method == "typemorph.aes-recovery" ||
+        method == "time-aes" || method == "typemorph.time-aes") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        crypto::AesKeyRecoveryEngine engine;
+        auto rep = engine.analyze(view_result.value());
+        auto parsed = parse_json(crypto::AesKeyRecoveryEngine::to_json(rep));
+        if (parsed) return parsed.value();
+        return JsonValue::object();
+    }
     if (method == "decompile" || method == "typemorph.decompile") {
         auto file = json_string_field(params, "file");
         if (!file) return file.error();
@@ -5036,6 +5080,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_lua(parsed.value(), out_, err_);
+    }
+    if (command == "aes-recovery" || command == "time-aes" || command == "aesfind") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_aes_recovery(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";
