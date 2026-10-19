@@ -6,9 +6,11 @@
 #include "typemorph/core/executable.hpp"
 #include "typemorph/core/result.hpp"
 #include "typemorph/crypto/crypto_scanner.hpp"
+#include "typemorph/deobf/cff_reconstructor.hpp"
 #include "typemorph/deobf/devirtualizer.hpp"
 #include "typemorph/deobf/strings.hpp"
 #include "typemorph/deobf/unxorer.hpp"
+#include "typemorph/infer/bitfield_detector.hpp"
 #include "typemorph/derust/demangle.hpp"
 #include "typemorph/derust/enum_reconstruct.hpp"
 #include "typemorph/derust/slice_scanner.hpp"
@@ -624,6 +626,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph diff <file_a> <file_b> [--json]\n"
                "Structural and binary diffing: byte changes, section & symbol deltas, entropy shifts.\n";
     }
+    if (command == "cff") {
+        return "Usage: typemorph cff <binary> [--function=VA] [--format=dot|mermaid|json] [--json]\n"
+               "Reconstruct Control Flow Flattening (CFF) state transitions and unflatten CFG.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -635,8 +641,9 @@ std::string command_help(std::string_view command) {
            "  rust <binary>        Rust semantic recovery\n"
            "  hybrid <binary>      Infer an embedded executable section\n"
            "  unxor <file>         XOR key discovery and deobfuscation\n"
-           "  strings <file>       String revealer (ASCII, UTF-16, stack, XOR)\n"
+           "  strings <file>       String revealer (ASCII, UTF-16, stack, XOR, base64)\n"
            "  devirt <binary>      Devirtualizer (VM dispatchers & handlers)\n"
+           "  cff <binary>         Control flow unflattening & CFG recovery\n"
            "  entropy <file>       Shannon entropy graph & high-density zones\n"
            "  sig <binary>         Generate YARA rule from invariants & strings\n"
            "  crypto <file>        Detect cryptographic & hashing constants\n"
@@ -1740,6 +1747,135 @@ int command_diff(const Arguments& args, std::ostream& out, std::ostream& err) {
     return 0;
 }
 
+int command_cff(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << "Usage: typemorph cff <file> [--function <va>] [--format dot|mermaid|json] [--json]\n\n"
+            << "Detects and reconstructs Control Flow Flattening (CFF) state transition loops.\n"
+            << "Recovers dispatcher state keys, eliminates the central switch dispatcher, and\n"
+            << "outputs the unflattened control flow sequence as DOT, Mermaid, or JSON.\n";
+        return 0;
+    }
+    const auto path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph cff: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+    auto image_res = core::ExecutableImage::parse(view.value());
+    if (!image_res) {
+        err << "typemorph cff: " << format_error(image_res.error()) << '\n';
+        return 1;
+    }
+
+    deobf::CffOptions opts;
+    deobf::CffReconstructor reconstructor(opts);
+    std::vector<deobf::CffFunction> fns;
+
+    if (args.has("function")) {
+        auto func_va_res = parse_u64(args.get_or("function", "0"), "function");
+        if (!func_va_res) {
+            err << "typemorph cff: " << format_error(func_va_res.error()) << '\n';
+            return 1;
+        }
+        fns = reconstructor.analyze_function(image_res.value(), func_va_res.value());
+    } else {
+        fns = reconstructor.analyze(image_res.value());
+    }
+
+    const std::string fmt = args.get_or("format", "");
+    const bool json_out = args.has("json") || fmt == "json";
+
+    if (json_out) {
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(path);
+        doc["count"] = JsonValue(static_cast<std::uint64_t>(fns.size()));
+        JsonValue array = JsonValue::array();
+        for (const auto& fn : fns) {
+            JsonValue entry = JsonValue::object();
+            entry["dispatcher_va"] = JsonValue(fn.dispatcher_va);
+            entry["state_variable"] = JsonValue(fn.state_variable);
+            entry["block_count"] = JsonValue(static_cast<std::uint64_t>(fn.blocks.size()));
+            entry["transition_count"] = JsonValue(static_cast<std::uint64_t>(fn.transitions.size()));
+            entry["confidence"] = JsonValue(fn.confidence);
+            entry["rationale"] = JsonValue(fn.rationale);
+            entry["dot"] = JsonValue(fn.to_dot());
+            entry["mermaid"] = JsonValue(fn.to_mermaid());
+
+            JsonValue blocks_arr = JsonValue::array();
+            for (const auto& b : fn.blocks) {
+                JsonValue blk = JsonValue::object();
+                blk["state_id"] = JsonValue(static_cast<std::uint64_t>(b.state_id));
+                blk["va"] = JsonValue(b.block_va);
+                blk["size"] = JsonValue(static_cast<std::uint64_t>(b.size));
+                blk["is_entry"] = JsonValue(b.is_entry);
+                blk["is_exit"] = JsonValue(b.is_exit);
+                blocks_arr.push(std::move(blk));
+            }
+            entry["blocks"] = std::move(blocks_arr);
+
+            JsonValue trans_arr = JsonValue::array();
+            for (const auto& t : fn.transitions) {
+                JsonValue tr = JsonValue::object();
+                tr["from"] = JsonValue(static_cast<std::uint64_t>(t.from_state));
+                tr["to"] = JsonValue(static_cast<std::uint64_t>(t.to_state));
+                trans_arr.push(std::move(tr));
+            }
+            entry["transitions"] = std::move(trans_arr);
+
+            array.push(std::move(entry));
+        }
+        doc["functions"] = std::move(array);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    if (fmt == "dot") {
+        for (const auto& fn : fns) {
+            out << fn.to_dot() << '\n';
+        }
+        return 0;
+    }
+
+    if (fmt == "mermaid") {
+        for (const auto& fn : fns) {
+            out << fn.to_mermaid() << '\n';
+        }
+        return 0;
+    }
+
+    out << "TypeMorph Control Flow Flattening (CFF) Deobfuscator\n"
+        << "  Target: " << path << "\n"
+        << "  Flattened Functions Detected: " << fns.size() << "\n\n";
+
+    if (fns.empty()) {
+        out << "  No control flow flattening dispatchers detected.\n";
+        return 0;
+    }
+
+    for (std::size_t i = 0; i < fns.size(); ++i) {
+        const auto& fn = fns[i];
+        char va_buf[64];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llx", static_cast<unsigned long long>(fn.dispatcher_va));
+        out << "Function #" << i + 1 << ": Dispatcher at " << va_buf
+            << " (State Var: " << fn.state_variable << ", Confidence: "
+            << std::fixed << std::setprecision(1) << (fn.confidence * 100.0) << "%)\n"
+            << "  Blocks: " << fn.blocks.size() << " | Recovered Transitions: "
+            << fn.transitions.size() << "\n"
+            << "  " << fn.rationale << "\n";
+
+        out << "  State Transitions (Reconstructed Sequence):\n";
+        for (const auto& t : fn.transitions) {
+            char t_buf[128];
+            std::snprintf(t_buf, sizeof(t_buf), "    State 0x%X -> State 0x%X%s",
+                          t.from_state, t.to_state,
+                          t.condition.empty() ? "" : (" [" + t.condition + "]").c_str());
+            out << t_buf << "\n";
+        }
+        out << "\n";
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -1824,6 +1960,8 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("sig"));
         capabilities.push(JsonValue("crypto"));
         capabilities.push(JsonValue("diff"));
+        capabilities.push(JsonValue("cff"));
+        capabilities.push(JsonValue("bitfield"));
         result["capabilities"] = std::move(capabilities);
         return result;
     }
@@ -2235,6 +2373,58 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         doc["ranges"] = std::move(ranges);
         return doc;
     }
+    if (method == "cff" || method == "typemorph.cff") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto image_result = core::ExecutableImage::parse(view_result.value());
+        if (!image_result) return image_result.error();
+        deobf::CffOptions opts;
+        deobf::CffReconstructor reconstructor(opts);
+        auto fns = reconstructor.analyze(image_result.value());
+
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(file.value());
+        doc["count"] = JsonValue(static_cast<std::uint64_t>(fns.size()));
+        JsonValue array = JsonValue::array();
+        for (const auto& fn : fns) {
+            JsonValue entry = JsonValue::object();
+            entry["dispatcher_va"] = JsonValue(fn.dispatcher_va);
+            entry["state_variable"] = JsonValue(fn.state_variable);
+            entry["block_count"] = JsonValue(static_cast<std::uint64_t>(fn.blocks.size()));
+            entry["transition_count"] = JsonValue(static_cast<std::uint64_t>(fn.transitions.size()));
+            entry["confidence"] = JsonValue(fn.confidence);
+            entry["rationale"] = JsonValue(fn.rationale);
+            entry["dot"] = JsonValue(fn.to_dot());
+            entry["mermaid"] = JsonValue(fn.to_mermaid());
+
+            JsonValue blocks_arr = JsonValue::array();
+            for (const auto& b : fn.blocks) {
+                JsonValue blk = JsonValue::object();
+                blk["state_id"] = JsonValue(static_cast<std::uint64_t>(b.state_id));
+                blk["va"] = JsonValue(b.block_va);
+                blk["size"] = JsonValue(static_cast<std::uint64_t>(b.size));
+                blk["is_entry"] = JsonValue(b.is_entry);
+                blk["is_exit"] = JsonValue(b.is_exit);
+                blocks_arr.push(std::move(blk));
+            }
+            entry["blocks"] = std::move(blocks_arr);
+
+            JsonValue trans_arr = JsonValue::array();
+            for (const auto& t : fn.transitions) {
+                JsonValue tr = JsonValue::object();
+                tr["from"] = JsonValue(static_cast<std::uint64_t>(t.from_state));
+                tr["to"] = JsonValue(static_cast<std::uint64_t>(t.to_state));
+                trans_arr.push(std::move(tr));
+            }
+            entry["transitions"] = std::move(trans_arr);
+
+            array.push(std::move(entry));
+        }
+        doc["functions"] = std::move(array);
+        return doc;
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -2444,6 +2634,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_diff(parsed.value(), out_, err_);
+    }
+    if (command == "cff") {
+        auto parsed = parse_arguments(
+            rest, {"function", "format"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_cff(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

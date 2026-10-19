@@ -75,3 +75,43 @@ TEST_CASE("strings: stack string reconstruction") {
     CHECK_EQ(strings[0].value, std::string("pass"));
     CHECK(strings[0].category == StringCategory::stack_string);
 }
+
+TEST_CASE("strings: base64 extraction") {
+    // "aHR0cDovL2V2aWwuY29t" is base64 for "http://evil.com"
+    std::string payload = "###aHR0cDovL2V2aWwuY29t###";
+    std::vector<std::uint8_t> buffer(payload.begin(), payload.end());
+    BinaryView view = BinaryView::from_owned(std::move(buffer));
+    StringScanOptions options;
+    options.scan_ascii = false;
+    options.scan_utf16le = false;
+    options.scan_stack_strings = false;
+    options.scan_xor_strings = false;
+    options.scan_base64 = true;
+    options.scan_rot13 = false;
+    StringRevealer revealer(options);
+    auto strings = revealer.extract(view);
+
+    REQUIRE(strings.size() >= 1);
+    CHECK(strings[0].value == "http://evil.com");
+    CHECK(strings[0].category == StringCategory::decoded_base64);
+}
+
+TEST_CASE("strings: rot13 extraction") {
+    // ROT13 of "powershell" is "cbjrefuryy"
+    std::string payload = "###cbjrefuryy###";
+    std::vector<std::uint8_t> buffer(payload.begin(), payload.end());
+    BinaryView view = BinaryView::from_owned(std::move(buffer));
+    StringScanOptions options;
+    options.scan_ascii = false;
+    options.scan_utf16le = false;
+    options.scan_stack_strings = false;
+    options.scan_xor_strings = false;
+    options.scan_base64 = false;
+    options.scan_rot13 = true;
+    StringRevealer revealer(options);
+    auto strings = revealer.extract(view);
+
+    REQUIRE(strings.size() >= 1);
+    CHECK(strings[0].value == "powershell");
+    CHECK(strings[0].category == StringCategory::decoded_rot13);
+}

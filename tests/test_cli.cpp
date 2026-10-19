@@ -282,5 +282,17 @@ TEST_CASE("cli: diff compares two binary files") {
     CHECK(parsed.value().find("ranges") != nullptr);
 }
 
+TEST_CASE("cli: cff analyzes target file and outputs JSON and text") {
+    const auto text_res = invoke({"cff", fixture_path("rust_sample.elf")});
+    CHECK_EQ(text_res.exit_code, 0);
+    CHECK(text_res.out.find("Control Flow Flattening") != std::string::npos);
+
+    const auto json_res = invoke({"cff", fixture_path("rust_sample.elf"), "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("functions") != nullptr);
+}
+
 
 

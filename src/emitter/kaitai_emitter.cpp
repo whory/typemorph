@@ -189,6 +189,14 @@ private:
                     enum_names_.emplace(node, make_identifier(name, "enum", used_enum_names_));
                 }
                 return;
+            } else if (const auto* bitfield = node->get_if<core::BitfieldNode>()) {
+                (void)bitfield;
+                if (type_names_.find(node) == type_names_.end()) {
+                    std::string name = node->name.empty() ? "flags" : node->name;
+                    type_names_.emplace(node, make_type_identifier(name, type_names_.size()));
+                    nested_order_.push_back(node);
+                }
+                return;
             }
         }
         if (const auto* struct_node = node->get_if<core::StructNode>()) {
@@ -271,6 +279,15 @@ private:
         }
         if (const auto* structure = type.get_if<core::StructNode>()) {
             (void)structure;
+            line(pad + "- id: " + id);
+            const auto found = type_names_.find(&type);
+            if (found == type_names_.end()) return false;
+            line(pad + "  type: " + found->second);
+            write_doc(field, pad);
+            return true;
+        }
+        if (const auto* bitfield = type.get_if<core::BitfieldNode>()) {
+            (void)bitfield;
             line(pad + "- id: " + id);
             const auto found = type_names_.find(&type);
             if (found == type_names_.end()) return false;
@@ -434,6 +451,13 @@ private:
             if (const auto* structure = type->get_if<core::StructNode>()) {
                 for (const auto& field : structure->fields) {
                     if (write_attribute(field, 3, used)) any = true;
+                }
+            } else if (const auto* bitfield = type->get_if<core::BitfieldNode>()) {
+                for (const auto& member : bitfield->members) {
+                    std::string mid = make_identifier(member.name, "flag", used);
+                    line(indent(3) + "- id: " + mid);
+                    line(indent(3) + "  type: b" + std::to_string(member.bit_width));
+                    any = true;
                 }
             }
             if (!any) {

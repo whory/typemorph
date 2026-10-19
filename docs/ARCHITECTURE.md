@@ -42,13 +42,16 @@ the same inference and DeRust results.
    size changes. A stride is accepted only if all deltas divide exactly and the
    implied length fits every sample. The count field becomes an `ArrayNode`
    length with `element_stride`.
+4. **Bitfield & Flag Detector (`typemorph::infer::BitfieldDetector`)**:
+   - Analyzes integer fields across multi-sample columns for power-of-two values, independent toggle bitmasks, and bit gaps.
+   - Converts confirmed bitmask sets into `core::BitfieldNode` with structured `BitfieldMember` offsets and widths.
 5. **Sequence detection** — monotonic values across sample order produce
    timestamp/ID evidence.
 6. **Merge** — greedy non-overlapping field selection with confidence threshold;
    gaps become `Unknown`/`Padding`. Nested record structs are inferred by
    scanning the repeated element region.
-7. **Emit** — `KaitaiEmitter`, `ImHexEmitter`, `CppEmitter` walk the AST. Count
-   links become `repeat-expr`, C++ `std::vector`/`std::span`, and ImHex arrays.
+7. **Emit** — `KaitaiEmitter`, `ImHexEmitter`, `CppEmitter`, `RustEmitter` walk the AST. Count
+   links become `repeat-expr`, C++ `std::vector`/`std::span`, and ImHex arrays. Bitfields become native `b1`/`bN` fields in Kaitai, bitfield structs in C++, `#[repr(transparent)]` structs with const bitmasks in Rust, and `bitfield` blocks in ImHex.
 
 Confidence is a product of independent evidence; the CLI's
 `--confidence-threshold` filters low-evidence fields from emitted output.
@@ -70,31 +73,38 @@ Confidence is a product of independent evidence; the CLI's
 
 ## Deobfuscation pipeline
 
-1. **UnXORer (`typemorph::deobf::Unxorer`)**:
+1. **Control Flow Flattening (CFF) Reconstructor (`typemorph::deobf::CffReconstructor`)**:
+   - Identifies dispatcher compare ladders (`cmp [state], imm32` / `je [target]`).
+   - Maps state variable IDs to basic block handlers and resolves dispatcher loops.
+   - Follows block executions to discover state update mutations (`mov [state], next_id`) and back-edges.
+   - Unflattens obscured control flow graphs and exports to Graphviz DOT, Mermaid diagrams, and JSON AST.
+2. **UnXORer (`typemorph::deobf::Unxorer`)**:
    - Single-byte XOR brute force: evaluates all 256 keys using English character frequency (Chi-squared metric against natural language priors) and printable byte ratio.
    - Multi-byte repeating XOR: derives candidate key lengths via Index of Coincidence (IC), solves each key column via frequency analysis, and reduces periodic duplicate keys (`reduce_key`).
    - Rolling XOR: decrypts streams where byte `i` is XORed with `(k + i)`.
    - Null-run exploitation: inspects contiguous zero-padding regions in file containers to directly read multi-byte repeating keys.
-2. **String Revealer (`typemorph::deobf::StringRevealer`)**:
+3. **String Revealer (`typemorph::deobf::StringRevealer`)**:
    - Multi-mode scanning: printable ASCII, UTF-8, and UTF-16LE wide strings.
    - Stack string reconstruction: scans machine code for x86/x64 immediate stack moves (`mov [rbp-disp], imm8/imm32`) and reassembles contiguous string literals.
    - XOR-encoded strings: identifies small localized XOR-encrypted blocks with high printable yields.
-3. **Devirtualizer (`typemorph::deobf::Devirtualizer`)**:
+   - Base64 payload decoding: isolates Base64 runs, filters non-payload ASCII false positives, and validates decoded printable payload buffers.
+   - ROT13 deobfuscation: scans tokenized buffers, applies Caesar cipher shifts, and matches recovered system commands/keywords.
+4. **Devirtualizer (`typemorph::deobf::Devirtualizer`)**:
    - Jump table scanner: detects dense arrays of valid code pointers within read-only image sections.
    - Function prologue validation: verifies code pointers against known x86/x64 prologs (`push rbp`, `mov rbp, rsp`, `sub rsp`, `endbr64`).
    - VM dispatcher identification: maps opcode indices to routine entry points and traces candidate bytecode streams.
 
-4. **Entropy Analysis Engine (`typemorph::core::shannon_entropy`)**:
+5. **Entropy Analysis Engine (`typemorph::core::shannon_entropy`)**:
    - Calculates exact Shannon entropy in bits per byte over sliding windows or uniform blocks.
    - Categorizes regions into `zero`/`sparse` (<1.0), `structured`/`code` (1.0-6.0), `compressed`/`text` (6.0-7.2), and `encrypted`/`packed` (>7.2).
    - Renders ASCII bar visualizations in CLI and density heat maps in TUI.
-5. **YARA Signature Generation Engine**:
+6. **YARA Signature Generation Engine**:
    - Synthesizes robust detection rules matching invariant format magics, high-confidence recovered strings, and jump table entry points.
    - Outputs ready-to-deploy `.yar` rule files with structural conditions.
-6. **Crypto & Hash Constant Detector (`typemorph::crypto::CryptoScanner`)**:
-   - Matches cryptographic constants (AES forward/inverse S-boxes, Rijndael Rcon, SHA-256 / SHA-1 states & round constants, MD5 sine tables, ChaCha20/Salsa20 sigma/tau strings, CRC32 tables, and TEA deltas).
+7. **Crypto & Hash Constant Detector (`typemorph::crypto::CryptoScanner`)**:
+   - Matches cryptographic constants: AES forward/inverse S-boxes, Rijndael Rcon, SHA-256 / SHA-1 states & round constants, MD5 sine tables, ChaCha20/Salsa20 sigma/tau strings, CRC32 tables, TEA deltas, Blowfish P-array, DES initial permutation tables, SM4 S-box/FK constants, Curve25519 field prime modulus, and Keccak-f[1600] constants.
    - Reports file offsets, algorithm family, roles, categories, and endianness.
-7. **Structural Binary Diff Engine (`typemorph::diff::BinaryDiffEngine`)**:
+8. **Structural Binary Diff Engine (`typemorph::diff::BinaryDiffEngine`)**:
    - Aligns and compares two binary files at the byte level with similarity scoring.
    - Cross-analyzes sections and symbols when comparing two ELF, PE, or Mach-O executable images.
 
@@ -116,7 +126,7 @@ Confidence is a product of independent evidence; the CLI's
 
 ## CLI / JSON-RPC
 
-`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `entropy`, `sig`, `crypto`, `diff`, `serve`), builds engine options, and
+`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `entropy`, `sig`, `crypto`, `diff`, `serve`), builds engine options, and
 delegates to `KaitaiEmitter`/`RustEmitter`/etc. `serve --stdio` performs line-delimited
 JSON-RPC 2.0 using the same helpers, so protocol and CLI behavior cannot drift.
 JSON is produced by the built-in `JsonValue` writer (or nlohmann/json when

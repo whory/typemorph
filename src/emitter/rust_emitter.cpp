@@ -58,6 +58,12 @@ using core::TypeNode;
     return std::find(keywords.begin(), keywords.end(), name) != keywords.end();
 }
 
+[[nodiscard]] std::string hex_u64(std::uint64_t val) {
+    std::ostringstream ss;
+    ss << std::hex << val;
+    return ss.str();
+}
+
 [[nodiscard]] std::string upper_camel(std::string_view raw, std::string_view fallback) {
     std::string out;
     bool capitalise = true;
@@ -119,6 +125,7 @@ public:
     [[nodiscard]] std::string run() {
         write_header();
         write_enums();
+        write_bitfields();
         write_structs();
         return stream_.str();
     }
@@ -135,7 +142,8 @@ private:
     void collect_types(const TypeNode& node, const std::string& hint) {
         if (const auto* structure = node.get_if<core::StructNode>()) {
             if (struct_names_.find(&node) != struct_names_.end()) return;
-            std::string name = hint.empty() ? "Record" : hint;
+            std::string base_name = !node.name.empty() ? node.name : (hint.empty() ? "Record" : hint);
+            std::string name = upper_camel(base_name, "Record");
             std::string unique = name;
             int suffix = 2;
             while (!used_names_.insert(unique).second) {
@@ -154,8 +162,10 @@ private:
                 collect_types(*array->element, hint + "Item");
             }
         } else if (const auto* enumeration = node.get_if<core::EnumNode>()) {
+            (void)enumeration;
             if (enum_names_.find(&node) != enum_names_.end()) return;
-            std::string name = hint.empty() ? "Enum" : hint;
+            std::string base_name = !node.name.empty() ? node.name : (hint.empty() ? "Enum" : hint);
+            std::string name = upper_camel(base_name, "Enum");
             std::string unique = name;
             int suffix = 2;
             while (!used_names_.insert(unique).second) {
@@ -163,6 +173,18 @@ private:
             }
             enum_names_.emplace(&node, unique);
             ordered_enums_.push_back(&node);
+        } else if (const auto* bitfield = node.get_if<core::BitfieldNode>()) {
+            (void)bitfield;
+            if (bitfield_names_.find(&node) != bitfield_names_.end()) return;
+            std::string base_name = !node.name.empty() ? node.name : (hint.empty() ? "Flags" : hint);
+            std::string name = upper_camel(base_name, "Flags");
+            std::string unique = name;
+            int suffix = 2;
+            while (!used_names_.insert(unique).second) {
+                unique = name + std::to_string(suffix++);
+            }
+            bitfield_names_.emplace(&node, unique);
+            ordered_bitfields_.push_back(&node);
         }
     }
 
@@ -188,6 +210,36 @@ private:
                 std::string var_name = upper_camel(var.name, "Variant" + std::to_string(i));
                 if (is_rust_keyword(var_name)) var_name += "_";
                 line(indent(1) + var_name + " = " + std::to_string(var.value) + ",");
+            }
+            line("}");
+            line("");
+        }
+    }
+
+    void write_bitfields() {
+        for (const auto* node : ordered_bitfields_) {
+            const auto* bitfield = node->get_if<core::BitfieldNode>();
+            if (!bitfield) continue;
+            const std::string& name = bitfield_names_[node];
+            const std::string prim = rust_primitive(bitfield->underlying);
+            line("#[repr(transparent)]");
+            line("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]");
+            line("pub struct " + name + "(pub " + prim + ");");
+            line("");
+            line("impl " + name + " {");
+            std::set<std::string> used_consts;
+            for (std::size_t i = 0; i < bitfield->members.size(); ++i) {
+                const auto& m = bitfield->members[i];
+                std::string c_name = upper_snake(m.name, "FLAG_" + std::to_string(i));
+                if (is_rust_keyword(c_name)) c_name += "_";
+                std::string unique_c = c_name;
+                int suffix = 2;
+                while (!used_consts.insert(unique_c).second) {
+                    unique_c = c_name + "_" + std::to_string(suffix++);
+                }
+                const std::uint64_t mask = (m.bit_width >= 64) ? ~0ULL : ((1ULL << m.bit_width) - 1ULL);
+                line(indent(1) + "pub const " + unique_c + ": " + prim + " = (0x" +
+                     hex_u64(mask) + " as " + prim + ") << " + std::to_string(m.bit_offset) + ";");
             }
             line("}");
             line("");
@@ -234,6 +286,10 @@ private:
             auto it = enum_names_.find(&type);
             return it != enum_names_.end() ? it->second : "u8";
         }
+        if (type.is<core::BitfieldNode>()) {
+            auto it = bitfield_names_.find(&type);
+            return it != bitfield_names_.end() ? it->second : "u32";
+        }
         if (type.is<core::StructNode>()) {
             auto it = struct_names_.find(&type);
             return it != struct_names_.end() ? it->second : "u8";
@@ -273,8 +329,10 @@ private:
     std::set<std::string> used_names_;
     std::map<const TypeNode*, std::string> struct_names_;
     std::map<const TypeNode*, std::string> enum_names_;
+    std::map<const TypeNode*, std::string> bitfield_names_;
     std::vector<const TypeNode*> ordered_structs_;
     std::vector<const TypeNode*> ordered_enums_;
+    std::vector<const TypeNode*> ordered_bitfields_;
 };
 
 }  // namespace

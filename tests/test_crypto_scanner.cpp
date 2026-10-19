@@ -57,4 +57,45 @@ TEST_CASE("crypto scanner: handles empty and plain data cleanly") {
     CHECK(matches.empty());
 }
 
+TEST_CASE("crypto scanner: detects Blowfish P-array and SM4 constants") {
+    std::vector<std::uint8_t> buffer(256, 0x00);
+    // Blowfish P[0..7] in LE
+    static const std::uint32_t kBlowfish[8] = {
+        0x243f6a88, 0x85a308d3, 0x13198a2e, 0x03707344,
+        0xa4093822, 0x299f31d0, 0x082efa98, 0xec4e6c89
+    };
+    for (std::size_t i = 0; i < 8; ++i) {
+        for (std::size_t b = 0; b < 4; ++b) {
+            buffer[20 + i * 4 + b] = static_cast<std::uint8_t>((kBlowfish[i] >> (b * 8)) & 0xFF);
+        }
+    }
+
+    auto view = BinaryView::from_external(buffer, "bf_test");
+    CryptoScanner scanner;
+    auto matches = scanner.scan(view);
+
+    REQUIRE(matches.size() >= 1);
+    CHECK(matches[0].offset == 20);
+    CHECK(matches[0].algorithm == "Blowfish");
+}
+
+TEST_CASE("crypto scanner: detects Curve25519 prime modulus") {
+    std::vector<std::uint8_t> buffer(128, 0x00);
+    static const std::uint8_t kCurve25519Prime[32] = {
+        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f
+    };
+    std::copy(kCurve25519Prime, kCurve25519Prime + 32, buffer.begin() + 40);
+
+    auto view = BinaryView::from_external(buffer, "curve_test");
+    CryptoScanner scanner;
+    auto matches = scanner.scan(view);
+
+    REQUIRE(matches.size() >= 1);
+    CHECK(matches[0].offset == 40);
+    CHECK(matches[0].algorithm == "Curve25519");
+}
+
 }  // namespace

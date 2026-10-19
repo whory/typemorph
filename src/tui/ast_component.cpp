@@ -76,6 +76,9 @@ constexpr std::size_t kNoEntry = std::numeric_limits<std::size_t>::max();
     }
     if (node.is<core::UnknownNode>()) return "unknown";
     if (node.is<core::PaddingNode>()) return "padding";
+    if (const auto* bitfield = node.get_if<core::BitfieldNode>()) {
+        return "bitfield<" + std::string(core::to_string(bitfield->underlying)) + ">";
+    }
     return "?";
 }
 

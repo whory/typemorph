@@ -180,6 +180,15 @@ private:
                                          node->name.empty() ? std::string("Enum") : node->name,
                                          "Enum"));
         }
+        if (node->is<core::BitfieldNode>() && bitfield_names_.find(node) == bitfield_names_.end()) {
+            bitfield_names_.emplace(node, make_type_name(
+                                              node->name.empty() ? std::string("Flags") : node->name,
+                                              "Flags"));
+            if (std::find(definition_order_.begin(), definition_order_.end(), node) ==
+                definition_order_.end()) {
+                definition_order_.push_back(node);
+            }
+        }
         if (const auto* structure = node->get_if<core::StructNode>()) {
             for (const auto& field : structure->fields) {
                 if (!field.type) continue;
@@ -282,6 +291,12 @@ private:
                  name + ";");
             return;
         }
+        if (type.is<core::BitfieldNode>()) {
+            const auto found = bitfield_names_.find(&type);
+            line(pad + (found != bitfield_names_.end() ? found->second : std::string("u32")) + " " +
+                 name + ";");
+            return;
+        }
         if (type.is<core::StructNode>()) {
             const auto found = type_names_.find(&type);
             line(pad + (found != type_names_.end() ? found->second : std::string("u8")) + " " +
@@ -360,6 +375,26 @@ private:
     }
 
     void write_struct(const TypeNode* node) {
+        if (const auto* bitfield = node->get_if<core::BitfieldNode>()) {
+            const auto found_bf = bitfield_names_.find(node);
+            if (found_bf == bitfield_names_.end()) return;
+            line("bitfield " + found_bf->second + " {");
+            std::set<std::string> used;
+            for (std::size_t i = 0; i < bitfield->members.size(); ++i) {
+                const auto& member = bitfield->members[i];
+                std::string member_name = lower_snake(member.name, "flag_" + std::to_string(i));
+                if (is_keyword(member_name)) member_name += "_";
+                std::string unique = member_name;
+                int suffix = 2;
+                while (!used.insert(unique).second) {
+                    unique = member_name + "_" + std::to_string(suffix++);
+                }
+                line(indent(1) + unique + " : " + std::to_string(member.bit_width) + ";");
+            }
+            line("};");
+            line("");
+            return;
+        }
         const auto found = type_names_.find(node);
         if (found == type_names_.end()) return;
         const auto* structure = node->get_if<core::StructNode>();
@@ -417,6 +452,7 @@ private:
     std::string root_type_name_;
     std::map<const TypeNode*, std::string> type_names_;
     std::map<const TypeNode*, std::string> enum_names_;
+    std::map<const TypeNode*, std::string> bitfield_names_;
     std::vector<const TypeNode*> definition_order_;
     std::set<std::string> used_type_names_;
     std::set<const TypeNode*> emitted_enums_;

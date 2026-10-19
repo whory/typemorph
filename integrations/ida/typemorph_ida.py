@@ -199,11 +199,41 @@ class TypeMorphIdaSync:
                 ea = ida_nalt.get_imagebase() + offset
                 ida_bytes.set_cmt(ea, f"[TypeMorph Crypto] {algo} - {role} ({desc})", False)
 
+    def sync_cff(self) -> None:
+        """Deobfuscates Control Flow Flattening (CFF) and labels reconstructed blocks."""
+        print(f"[TypeMorph IDA] Analyzing Control Flow Flattening in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "cff", self.target_path)
+        if not data:
+            return
+        fns = data.get("functions", [])
+        print(f"[TypeMorph IDA] Found {len(fns)} flattened function(s)")
+        if IN_IDA:
+            for idx, fn in enumerate(fns):
+                disp_ea = fn.get("dispatcher_va", 0)
+                state_var = fn.get("state_variable", "")
+                blocks = fn.get("blocks", [])
+                transitions = fn.get("transitions", [])
+                if disp_ea:
+                    ida_name.set_name(disp_ea, f"cff_dispatcher_{idx}", ida_name.SN_NOWARN)
+                    cmt = f"[TypeMorph CFF Dispatcher #{idx}] StateVar: {state_var}\n"
+                    for t in transitions[:8]:
+                        cmt += f"State 0x{t.get('from', 0):X} -> State 0x{t.get('to', 0):X}\n"
+                    ida_bytes.set_cmt(disp_ea, cmt, False)
+
+                for blk in blocks:
+                    st_id = blk.get("state_id", 0)
+                    ea = blk.get("va", 0)
+                    if ea:
+                        tag = "entry" if blk.get("is_entry") else ("exit" if blk.get("is_exit") else "case")
+                        ida_name.set_name(ea, f"cff_st_0x{st_id:X}_{tag}", ida_name.SN_NOWARN)
+                        ida_bytes.set_cmt(ea, f"[TypeMorph CFF State 0x{st_id:X} ({tag})]", False)
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
         self.sync_crypto()
+        self.sync_cff()
         print("[TypeMorph IDA] Synchronization complete!")
 
 

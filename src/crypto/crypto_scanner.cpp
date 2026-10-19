@@ -59,6 +59,17 @@ std::vector<std::uint8_t> u32_to_be(std::span<const std::uint32_t> words) {
     return out;
 }
 
+std::vector<std::uint8_t> u64_to_le(std::span<const std::uint64_t> words) {
+    std::vector<std::uint8_t> out;
+    out.reserve(words.size() * 8);
+    for (std::uint64_t w : words) {
+        for (int i = 0; i < 8; ++i) {
+            out.push_back(static_cast<std::uint8_t>((w >> (i * 8)) & 0xFF));
+        }
+    }
+    return out;
+}
+
 std::vector<SignatureDefinition> build_signatures() {
     std::vector<SignatureDefinition> sigs;
 
@@ -186,6 +197,83 @@ std::vector<SignatureDefinition> build_signatures() {
         "CRC-32", "Polynomial Table (IEEE 802.3)", CryptoCategory::checksum, "little-endian",
         "Precomputed CRC-32 table generated from polynomial 0xEDB88320",
         u32_to_le(kCrc32)
+    });
+
+    // 10. Blowfish P-Array (pi fraction in hex)
+    static const std::uint32_t kBlowfishP[8] = {
+        0x243f6a88, 0x85a308d3, 0x13198a2e, 0x03707344,
+        0xa4093822, 0x299f31d0, 0x082efa98, 0xec4e6c89
+    };
+    sigs.push_back({
+        "Blowfish", "P-Array (P[0..7])", CryptoCategory::cipher, "little-endian",
+        "Blowfish subkey P-array initialized with hexadecimal digits of pi",
+        u32_to_le(kBlowfishP)
+    });
+    sigs.push_back({
+        "Blowfish", "P-Array (P[0..7])", CryptoCategory::cipher, "big-endian",
+        "Blowfish subkey P-array initialized with hexadecimal digits of pi",
+        u32_to_be(kBlowfishP)
+    });
+
+    // 11. DES Initial Permutation Table (first 16 entries)
+    static const std::uint8_t kDesIp[16] = {
+        58, 50, 42, 34, 26, 18, 10, 2,
+        60, 52, 44, 36, 28, 20, 12, 4
+    };
+    sigs.push_back({
+        "DES", "Initial Permutation (IP)", CryptoCategory::cipher, "byte",
+        "Data Encryption Standard initial bit permutation table",
+        std::vector<std::uint8_t>(kDesIp, kDesIp + sizeof(kDesIp))
+    });
+
+    // 12. SM4 S-Box (first 32 bytes) and FK Parameter
+    static const std::uint8_t kSm4Sbox[32] = {
+        0xd6, 0x90, 0xe9, 0xfe, 0xcc, 0xe1, 0x3d, 0xb7, 0x16, 0xb6, 0x14, 0xc2, 0x28, 0xfb, 0x2c, 0x05,
+        0x2b, 0x67, 0x9a, 0x76, 0x2a, 0xbe, 0x04, 0xc3, 0xaa, 0x44, 0x13, 0x26, 0x49, 0x86, 0x06, 0x99
+    };
+    sigs.push_back({
+        "SM4", "S-Box", CryptoCategory::cipher, "byte",
+        "Chinese national standard SMS4 / SM4 block cipher non-linear S-box",
+        std::vector<std::uint8_t>(kSm4Sbox, kSm4Sbox + sizeof(kSm4Sbox))
+    });
+
+    static const std::uint32_t kSm4Fk[4] = {
+        0xa3b1bac6, 0x56aa3350, 0x677d9197, 0xb27022dc
+    };
+    sigs.push_back({
+        "SM4", "System Parameter FK", CryptoCategory::cipher, "little-endian",
+        "SM4 key schedule system parameter FK constants",
+        u32_to_le(kSm4Fk)
+    });
+    sigs.push_back({
+        "SM4", "System Parameter FK", CryptoCategory::cipher, "big-endian",
+        "SM4 key schedule system parameter FK constants",
+        u32_to_be(kSm4Fk)
+    });
+
+    // 13. Curve25519 Prime Constant 2^255 - 19
+    static const std::uint8_t kCurve25519Prime[32] = {
+        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f
+    };
+    sigs.push_back({
+        "Curve25519", "Field Prime (2^255 - 19)", CryptoCategory::cipher, "little-endian",
+        "Montgomery Curve25519 / Ed25519 prime field modulus",
+        std::vector<std::uint8_t>(kCurve25519Prime, kCurve25519Prime + sizeof(kCurve25519Prime))
+    });
+
+    // 14. SHA-3 / Keccak Round Constants RC[0..5]
+    static const std::uint64_t kKeccakRc[6] = {
+        0x0000000000000001ULL, 0x0000000000008082ULL,
+        0x800000000000808aULL, 0x8000000080008000ULL,
+        0x000000000000808bULL, 0x0000000080000001ULL
+    };
+    sigs.push_back({
+        "SHA-3 / Keccak", "Round Constants RC[0..5]", CryptoCategory::hash, "little-endian",
+        "Keccak-f[1600] permutation round constants generated from LFSR",
+        u64_to_le(kKeccakRc)
     });
 
     return sigs;

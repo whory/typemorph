@@ -30,24 +30,26 @@ Ghidra/IDA/editor integration.
 - **Diff-Infer** — inferring a format from one file is guessing; inferring from
   several is arithmetic. TypeMorph correlates changing integer fields with file
   size deltas (`Δsize / Δcount` = element stride), finds invariant magic with
-  bitwise masking, and tags monotonic sequences as timestamps/IDs.
+  bitwise masking, tags monotonic sequences as timestamps/IDs, and infers **bitfield flag sets**
+  via power-of-two and bit-gap analysis.
 - **DeRust** — validates Rust fat pointers `(ptr, len)` against `.rodata`,
   reconstructs `[drop_in_place, size, align, methods...]` trait vtables, and
   demangles both legacy `_ZN...E` and modern `_Rv0` symbols.
 - **Deobfuscation Engine** — includes:
+  * **Control Flow Flattening (CFF) Reconstructor**: detects dispatcher compare ladders, maps state variable IDs to basic blocks, tracks state transitions, and emits unflattened CFG graphs in Graphviz DOT, Mermaid, and JSON (`typemorph cff`).
   * **UnXORer**: automated single-byte, multi-byte, and rolling XOR cracking using IC and null-run heuristics.
-  * **String Revealer**: extracts ASCII, UTF-16, x86/x64 stack strings (`mov [rbp-X], byte/imm32`), and XOR payloads.
+  * **String Revealer**: extracts ASCII, UTF-16, x86/x64 stack strings (`mov [rbp-X], byte/imm32`), XOR payloads, Base64 strings, and ROT13 obfuscated commands.
   * **Devirtualizer**: detects VM bytecode interpreters, maps jump tables, and extracts opcode -> handler routines.
 - **Four complete emitters** — Kaitai Struct 0.10 YAML (`.ksy`), ImHex pattern language (`.hexpat`),
-  compilable C++20 deserialization headers (`.hpp`), and idiomatic Rust structs (`.rs`), generated from the same recovered AST.
-- **Crypto & Hash Constant Scanner** — recognizes AES forward/inverse S-boxes, Rijndael Rcon, SHA-256 / SHA-1 initial states and round constants, MD5 constants, ChaCha20/Salsa20 sigma/tau strings, CRC32 tables, and TEA deltas.
+  compilable C++20 deserialization headers (`.hpp`), and idiomatic Rust structs (`.rs`), generated from the same recovered AST, with native bitfield support (`type: b1` in Kaitai, bitfield structs in C++, repr transparent + const masks in Rust, `bitfield` in ImHex).
+- **Crypto & Hash Constant Scanner** — recognizes AES forward/inverse S-boxes, Rijndael Rcon, SHA-256 / SHA-1 initial states and round constants, MD5 constants, ChaCha20/Salsa20 sigma/tau strings, CRC32 tables, TEA deltas, Blowfish P-array, DES IP tables, SM4 S-box/FK constants, Curve25519 field prime, and Keccak-f[1600] constants.
 - **Structural Binary Diffing** — byte-level delta mapping, similarity scoring, and section/symbol comparison for executables.
 - **Full RE Suite Integrations** — out-of-the-box scripts and plugins in `integrations/`:
   * **Ghidra**: `integrations/ghidra/typemorph_sync.py` (Python 3 / Ghidrathon / PyGhidra)
   * **IDA Pro**: `integrations/ida/typemorph_ida.py` (IDAPython for IDA 7.x/8.x/9.x)
   * **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binja API v3/v4 plugin)
   * **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
-- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `entropy`, `sig`, `crypto`, `diff`,
+- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `entropy`, `sig`, `crypto`, `diff`,
   `serve`) and an ANSI terminal dashboard with hex/entropy heat map, collapsible AST, and live preview (`e` Kaitai, `K` C++, `R` Rust, `s`/`w` save).
 - **Zero required third-party dependencies** — the analysis core, executable
   parser, JSON-RPC, TUI, and test harness are self-contained, so air-gapped RE
@@ -131,6 +133,10 @@ typemorph strings sample.bin --min-len=4
 # Devirtualize bytecode interpreter & extract handler jump tables
 typemorph devirt target.exe
 
+# Control flow unflattening (CFF) & CFG reconstruction
+typemorph cff target.exe --format=dot --out=unflattened.dot
+typemorph cff target.exe --function=0x140001000 --format=mermaid
+
 # Terminal ASCII Shannon entropy visualizer & packed section detector
 typemorph entropy sample.bin --block-size=64
 
@@ -176,7 +182,7 @@ python integrations/r2/typemorph_r2.py path/to/binary
 }}
 ```
 
-Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `entropy`, `sig`, `crypto`, `diff`
+Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `cff`, `bitfield`, `entropy`, `sig`, `crypto`, `diff`
 (also namespaced as `typemorph.*`). Notifications (requests without `id`) are
 executed without a reply, per JSON-RPC 2.0.
 

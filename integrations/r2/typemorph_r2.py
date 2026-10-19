@@ -173,11 +173,37 @@ class R2Sync:
             self.cmd(f"f crypto.{algo}.{role} = {offset}")
             self.cmd(f'CC [TypeMorph Crypto] "{algo}: {role} ({desc})" @ {offset}')
 
+    def sync_cff(self) -> None:
+        print(f"[TypeMorph R2] Analyzing Control Flow Flattening in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "cff", self.target_path)
+        if not data:
+            return
+        fns = data.get("functions", [])
+        print(f"[TypeMorph R2] Found {len(fns)} flattened function(s)...")
+        for idx, fn in enumerate(fns):
+            disp_va = fn.get("dispatcher_va", 0)
+            state_var = fn.get("state_variable", "")
+            blocks = fn.get("blocks", [])
+            transitions = fn.get("transitions", [])
+            if disp_va:
+                self.cmd(f"f cff.dispatcher.{idx} = {disp_va}")
+                cmt = f"[TypeMorph CFF Dispatcher #{idx}] StateVar: {state_var}"
+                self.cmd(f'CC "{cmt}" @ {disp_va}')
+
+            for blk in blocks:
+                st_id = blk.get("state_id", 0)
+                va = blk.get("va", 0)
+                if va:
+                    tag = "entry" if blk.get("is_entry") else ("exit" if blk.get("is_exit") else "case")
+                    self.cmd(f"f cff.block.{idx}.st_{hex(st_id)}.{tag} = {va}")
+                    self.cmd(f'CC "[TypeMorph CFF State {hex(st_id)} ({tag})]" @ {va}')
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
         self.sync_crypto()
+        self.sync_cff()
         print("[TypeMorph R2] Synchronization complete!")
 
 

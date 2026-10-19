@@ -18,9 +18,9 @@ StringRevealer::StringRevealer(StringScanOptions options) : options_(options) {
     if (options_.min_length == 0) options_.min_length = 4;
 }
 
-std::vector<ExtractedString> StringRevealer::extract_ascii_utf8(const core::BinaryView& view) const {
+std::vector<ExtractedString> scan_ascii_tokens(const core::BinaryView& view, std::size_t min_len, std::size_t max_len) {
     std::vector<ExtractedString> results;
-    if (!view.valid() || view.empty() || !options_.scan_ascii) return results;
+    if (!view.valid() || view.empty()) return results;
 
     const auto bytes = view.bytes();
     std::size_t start = 0;
@@ -31,7 +31,7 @@ std::vector<ExtractedString> StringRevealer::extract_ascii_utf8(const core::Bina
             if (current_len == 0) start = i;
             ++current_len;
         } else {
-            if (current_len >= options_.min_length && current_len <= options_.max_length) {
+            if (current_len >= min_len && current_len <= max_len) {
                 ExtractedString item;
                 item.value = std::string(reinterpret_cast<const char*>(bytes.data() + start), current_len);
                 item.offset = start;
@@ -44,7 +44,7 @@ std::vector<ExtractedString> StringRevealer::extract_ascii_utf8(const core::Bina
         }
     }
 
-    if (current_len >= options_.min_length && current_len <= options_.max_length) {
+    if (current_len >= min_len && current_len <= max_len) {
         ExtractedString item;
         item.value = std::string(reinterpret_cast<const char*>(bytes.data() + start), current_len);
         item.offset = start;
@@ -55,6 +55,11 @@ std::vector<ExtractedString> StringRevealer::extract_ascii_utf8(const core::Bina
     }
 
     return results;
+}
+
+std::vector<ExtractedString> StringRevealer::extract_ascii_utf8(const core::BinaryView& view) const {
+    if (!options_.scan_ascii) return {};
+    return scan_ascii_tokens(view, options_.min_length, options_.max_length);
 }
 
 std::vector<ExtractedString> StringRevealer::extract_utf16le(const core::BinaryView& view) const {
@@ -217,6 +222,166 @@ std::vector<ExtractedString> StringRevealer::extract_xor_strings(const core::Bin
     return results;
 }
 
+std::vector<ExtractedString> StringRevealer::extract_base64(const core::BinaryView& view) const {
+    std::vector<ExtractedString> results;
+    if (!view.valid() || view.size() < 8 || !options_.scan_base64) return results;
+
+    auto is_b64 = [](char c) noexcept {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+    };
+
+    auto b64_val = [](char c) noexcept -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+
+    const auto bytes = view.bytes();
+    for (std::size_t i = 0; i + 8 <= bytes.size(); ++i) {
+        if (!is_b64(static_cast<char>(bytes[i]))) continue;
+
+        std::size_t len = 0;
+        while (i + len < bytes.size() && is_b64(static_cast<char>(bytes[i + len])) && len < 512) {
+            ++len;
+        }
+
+        if (len >= 8) {
+            std::string_view b64_cand(reinterpret_cast<const char*>(bytes.data() + i), len);
+
+            // True base64 payload heuristic:
+            // Must contain padding ('=') or non-alphabetic base64 characters ('0'-'9', '+', '/').
+            // Plain alphabetic words like "HelloWorld" or "TestString" are ordinary ASCII tokens.
+            bool has_b64_indicator = false;
+            for (char c : b64_cand) {
+                if (c == '=' || (c >= '0' && c <= '9') || c == '+' || c == '/') {
+                    has_b64_indicator = true;
+                    break;
+                }
+            }
+
+            if (has_b64_indicator) {
+                std::vector<int> vals;
+                for (char c : b64_cand) {
+                    if (c == '=') break;
+                    int v = b64_val(c);
+                    if (v >= 0) vals.push_back(v);
+                    else { vals.clear(); break; }
+                }
+
+                if (vals.size() >= 2) {
+                    std::string decoded;
+                    for (std::size_t k = 0; k < vals.size(); k += 4) {
+                        int v0 = vals[k];
+                        int v1 = (k + 1 < vals.size()) ? vals[k + 1] : 0;
+                        int v2 = (k + 2 < vals.size()) ? vals[k + 2] : 0;
+                        int v3 = (k + 3 < vals.size()) ? vals[k + 3] : 0;
+
+                        decoded.push_back(static_cast<char>((v0 << 2) | (v1 >> 4)));
+                        if (k + 2 < vals.size()) {
+                            decoded.push_back(static_cast<char>(((v1 & 0xF) << 4) | (v2 >> 2)));
+                        }
+                        if (k + 3 < vals.size()) {
+                            decoded.push_back(static_cast<char>(((v2 & 0x3) << 6) | v3));
+                        }
+                    }
+
+                    if (decoded.size() >= options_.min_length) {
+                        std::size_t printable = 0;
+                        for (char c : decoded) {
+                            if (is_printable_byte(static_cast<std::uint8_t>(c))) ++printable;
+                        }
+                        if (printable >= static_cast<std::size_t>(static_cast<double>(decoded.size()) * 0.85)) {
+                            ExtractedString item;
+                            item.value = std::move(decoded);
+                            item.offset = i;
+                            item.raw_length = len;
+                            item.category = StringCategory::decoded_base64;
+                            item.confidence = 0.95;
+                            item.note = "decoded from Base64: " + std::string(b64_cand.substr(0, 32));
+                            results.push_back(std::move(item));
+                        }
+                    }
+                }
+            }
+            i += len - 1;
+        }
+    }
+    return results;
+}
+
+std::vector<ExtractedString> StringRevealer::extract_rot13(const core::BinaryView& view) const {
+    std::vector<ExtractedString> results;
+    if (!view.valid() || view.size() < 4 || !options_.scan_rot13) return results;
+
+    static const std::vector<std::string_view> kKeywords = {
+        "http", "powershell", "system", "admin", "password", "kernel", "cmd.exe",
+        "select", "insert", "update", "delete", "token", "session", "user", "file", "download"
+    };
+
+    auto is_rot_token_char = [](char c) noexcept {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':';
+    };
+
+    const auto bytes = view.bytes();
+    for (std::size_t i = 0; i + 4 <= bytes.size(); ++i) {
+        if (!is_rot_token_char(static_cast<char>(bytes[i]))) continue;
+
+        std::size_t len = 0;
+        while (i + len < bytes.size() && is_rot_token_char(static_cast<char>(bytes[i + len])) && len < 512) {
+            ++len;
+        }
+
+        if (len >= options_.min_length && len <= options_.max_length) {
+            std::string raw(reinterpret_cast<const char*>(bytes.data() + i), len);
+            std::string rotated;
+            rotated.reserve(len);
+            bool has_alpha = false;
+            for (char c : raw) {
+                if (c >= 'a' && c <= 'z') {
+                    rotated.push_back(static_cast<char>('a' + (c - 'a' + 13) % 26));
+                    has_alpha = true;
+                } else if (c >= 'A' && c <= 'Z') {
+                    rotated.push_back(static_cast<char>('A' + (c - 'A' + 13) % 26));
+                    has_alpha = true;
+                } else {
+                    rotated.push_back(c);
+                }
+            }
+
+            if (has_alpha && rotated != raw) {
+                std::string lower_rot = rotated;
+                for (char& c : lower_rot) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+                bool keyword_found = false;
+                for (const auto kw : kKeywords) {
+                    if (lower_rot.find(kw) != std::string::npos) {
+                        keyword_found = true;
+                        break;
+                    }
+                }
+
+                if (keyword_found) {
+                    ExtractedString item;
+                    item.value = std::move(rotated);
+                    item.offset = i;
+                    item.raw_length = len;
+                    item.category = StringCategory::decoded_rot13;
+                    item.confidence = 0.90;
+                    item.note = "ROT13 decoded from: " + raw;
+                    results.push_back(std::move(item));
+                }
+            }
+        }
+        i += len - 1;
+    }
+    return results;
+}
+
 std::vector<ExtractedString> StringRevealer::extract(const core::BinaryView& view) const {
     std::vector<ExtractedString> all;
 
@@ -231,6 +396,12 @@ std::vector<ExtractedString> StringRevealer::extract(const core::BinaryView& vie
 
     auto xor_strs = extract_xor_strings(view);
     all.insert(all.end(), xor_strs.begin(), xor_strs.end());
+
+    auto base64_strs = extract_base64(view);
+    all.insert(all.end(), base64_strs.begin(), base64_strs.end());
+
+    auto rot13_strs = extract_rot13(view);
+    all.insert(all.end(), rot13_strs.begin(), rot13_strs.end());
 
     std::sort(all.begin(), all.end(), [](const ExtractedString& a, const ExtractedString& b) {
         return a.offset < b.offset;

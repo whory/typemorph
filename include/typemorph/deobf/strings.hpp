@@ -17,6 +17,8 @@ enum class StringCategory {
     utf16le,
     stack_string,
     decoded_xor,
+    decoded_base64,
+    decoded_rot13,
 };
 
 [[nodiscard]] constexpr const char* to_string(StringCategory category) noexcept {
@@ -26,6 +28,8 @@ enum class StringCategory {
     case StringCategory::utf16le: return "utf16le";
     case StringCategory::stack_string: return "stack";
     case StringCategory::decoded_xor: return "xor";
+    case StringCategory::decoded_base64: return "base64";
+    case StringCategory::decoded_rot13: return "rot13";
     }
     return "unknown";
 }
@@ -46,6 +50,8 @@ struct StringScanOptions {
     bool scan_utf16le = true;
     bool scan_stack_strings = true;
     bool scan_xor_strings = true;
+    bool scan_base64 = true;
+    bool scan_rot13 = true;
 };
 
 class StringRevealer {
@@ -59,6 +65,8 @@ private:
     [[nodiscard]] std::vector<ExtractedString> extract_utf16le(const core::BinaryView& view) const;
     [[nodiscard]] std::vector<ExtractedString> extract_stack_strings(const core::BinaryView& view) const;
     [[nodiscard]] std::vector<ExtractedString> extract_xor_strings(const core::BinaryView& view) const;
+    [[nodiscard]] std::vector<ExtractedString> extract_base64(const core::BinaryView& view) const;
+    [[nodiscard]] std::vector<ExtractedString> extract_rot13(const core::BinaryView& view) const;
 
     StringScanOptions options_;
 };

@@ -195,10 +195,23 @@ struct PaddingNode {
     std::uint8_t fill = 0;
 };
 
+struct BitfieldMember {
+    std::string name;
+    std::uint8_t bit_offset = 0;  // 0-indexed from LSB
+    std::uint8_t bit_width = 1;   // Number of bits
+    std::string comment;
+};
+
+struct BitfieldNode {
+    PrimitiveKind underlying = PrimitiveKind::u32;
+    std::vector<BitfieldMember> members;
+    ByteOrder endian = ByteOrder::little;
+};
+
 class TypeNode {
 public:
     using Variant = std::variant<PrimitiveNode, ArrayNode, StructNode, EnumNode, SliceNode, PointerNode,
-                                 StringNode, UnknownNode, PaddingNode>;
+                                 StringNode, UnknownNode, PaddingNode, BitfieldNode>;
 
     Variant node = UnknownNode{};
     std::string name;
@@ -249,6 +262,9 @@ public:
                                         std::string name = {}, std::uint64_t offset = 0,
                                         std::uint64_t size = 0, std::string literal = {},
                                         std::string length_expr = {}, double confidence = 1.0);
+    [[nodiscard]] static TypePtr bitfield(PrimitiveKind underlying, std::vector<BitfieldMember> members,
+                                          ByteOrder endian = ByteOrder::little, std::string name = {},
+                                          std::uint64_t offset = 0, double confidence = 1.0);
     [[nodiscard]] static TypePtr unknown(std::uint64_t size, std::string name = {},
                                          std::uint64_t offset = 0);
     [[nodiscard]] static TypePtr padding(std::uint64_t size, std::uint8_t fill = 0,

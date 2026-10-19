@@ -201,11 +201,43 @@ class BinaryNinjaSync:
                 addr = self.bv.start + offset
                 self.bv.set_comment_at(addr, f"[TypeMorph Crypto] {algo} - {role} ({desc})")
 
+    def sync_cff(self) -> None:
+        """Deobfuscates Control Flow Flattening (CFF) and labels reconstructed blocks."""
+        print(f"[TypeMorph Binja] Analyzing Control Flow Flattening in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "cff", self.target_path)
+        if not data:
+            return
+        fns = data.get("functions", [])
+        print(f"[TypeMorph Binja] Found {len(fns)} flattened function(s)")
+        if self.bv:
+            for idx, fn in enumerate(fns):
+                disp_va = fn.get("dispatcher_va", 0)
+                state_var = fn.get("state_variable", "")
+                blocks = fn.get("blocks", [])
+                transitions = fn.get("transitions", [])
+                if disp_va:
+                    disp_sym = Symbol(SymbolType.FunctionSymbol, disp_va, f"cff_dispatcher_{idx}")
+                    self.bv.define_auto_symbol(disp_sym)
+                    cmt = f"[TypeMorph CFF Dispatcher #{idx}] StateVar: {state_var}\n"
+                    for t in transitions[:8]:
+                        cmt += f"State 0x{t.get('from', 0):X} -> State 0x{t.get('to', 0):X}\n"
+                    self.bv.set_comment_at(disp_va, cmt)
+
+                for blk in blocks:
+                    st_id = blk.get("state_id", 0)
+                    va = blk.get("va", 0)
+                    if va:
+                        tag = "entry" if blk.get("is_entry") else ("exit" if blk.get("is_exit") else "case")
+                        sym = Symbol(SymbolType.FunctionSymbol, va, f"cff_st_0x{st_id:X}_{tag}")
+                        self.bv.define_auto_symbol(sym)
+                        self.bv.set_comment_at(va, f"[TypeMorph CFF State 0x{st_id:X} ({tag})]")
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
         self.sync_crypto()
+        self.sync_cff()
         print("[TypeMorph Binja] Synchronization complete!")
 
 
@@ -215,7 +247,7 @@ def binja_sync_all(bv):
 
 
 if IN_BINJA:
-    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt, Crypto)", "Run full TypeMorph analysis", binja_sync_all)
+    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt, Crypto, CFF)", "Run full TypeMorph analysis", binja_sync_all)
 
 
 def main():

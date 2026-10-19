@@ -16,6 +16,7 @@ std::string TypeNode::kind_name() const {
     case 6: return "string";
     case 7: return "unknown";
     case 8: return "padding";
+    case 9: return "bitfield";
     default: return "invalid";
     }
 }
@@ -68,6 +69,10 @@ std::string TypeNode::describe() const {
         out << "opaque[" << u->fill << ']';
     } else if (const auto* pad = get_if<PaddingNode>()) {
         out << "padding[" << pad->fill << ']';
+    } else if (const auto* bf = get_if<BitfieldNode>()) {
+        out << "bitfield(" << to_string(bf->underlying) << "){";
+        out << bf->members.size() << " members";
+        out << '}';
     }
     return out.str();
 }
@@ -160,6 +165,18 @@ TypePtr TypeNode::string(StringForm form, StringEncoding encoding, std::string n
     node->name = std::move(name);
     node->offset = offset;
     node->size = size;
+    node->confidence = confidence;
+    return node;
+}
+
+TypePtr TypeNode::bitfield(PrimitiveKind underlying, std::vector<BitfieldMember> members,
+                           ByteOrder endian, std::string name,
+                           std::uint64_t offset, double confidence) {
+    auto node = std::make_shared<TypeNode>();
+    node->node = BitfieldNode{underlying, std::move(members), endian};
+    node->name = std::move(name);
+    node->offset = offset;
+    node->size = primitive_size(underlying);
     node->confidence = confidence;
     return node;
 }

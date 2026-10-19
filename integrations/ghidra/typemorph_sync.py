@@ -228,11 +228,44 @@ class GhidraSync:
                 createBookmark(addr, "TypeMorph-Crypto", f"{algo} - {role}")
                 setPlateComment(addr, f"[TypeMorph Crypto]\nAlgorithm: {algo} ({role})\nDescription: {desc}")
 
+    def sync_cff(self) -> None:
+        """Deobfuscates Control Flow Flattening (CFF) and labels reconstructed blocks."""
+        print(f"[TypeMorph Ghidra] Analyzing Control Flow Flattening in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "cff", self.target_path)
+        if not data:
+            return
+        fns = data.get("functions", [])
+        print(f"[TypeMorph Ghidra] Found {len(fns)} flattened function(s)")
+        if IN_GHIDRA:
+            for idx, fn in enumerate(fns):
+                disp_va = fn.get("dispatcher_va", 0)
+                state_var = fn.get("state_variable", "")
+                blocks = fn.get("blocks", [])
+                transitions = fn.get("transitions", [])
+                if disp_va:
+                    disp_addr = toAddr(disp_va)
+                    createLabel(disp_addr, f"cff_dispatcher_{idx}", True)
+                    createBookmark(disp_addr, "TypeMorph-CFF", f"CFF Dispatcher #{idx}")
+                    comment = f"[TypeMorph CFF Dispatcher #{idx}]\nState Variable: {state_var}\nBlocks: {len(blocks)}\nTransitions:\n"
+                    for t in transitions[:12]:
+                        comment += f"  State 0x{t.get('from', 0):X} -> State 0x{t.get('to', 0):X}\n"
+                    setPlateComment(disp_addr, comment)
+
+                for blk in blocks:
+                    st_id = blk.get("state_id", 0)
+                    va = blk.get("va", 0)
+                    if va:
+                        blk_addr = toAddr(va)
+                        tag = "entry" if blk.get("is_entry") else ("exit" if blk.get("is_exit") else "case")
+                        createLabel(blk_addr, f"cff_block_{idx}_st_0x{st_id:X}_{tag}", True)
+                        setEOLComment(blk_addr, f"[TypeMorph CFF State 0x{st_id:X} ({tag})]")
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
         self.sync_crypto()
+        self.sync_cff()
         print("[TypeMorph Ghidra] Synchronization complete!")
 
 
