@@ -227,6 +227,10 @@ typemorph vb project1.exe --source
 typemorph autoit compiled.exe
 typemorph autoit compiled.exe --out=extracted.au3
 
+# Virtual Filesystem (VFS) Extractor (Spoon Studio / Enigma Virtual Box / BoxedApp)
+typemorph vfs-extract virtualized.exe
+typemorph vfs-extract virtualized.exe --json
+
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe
 

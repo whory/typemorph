@@ -41,6 +41,7 @@
 #include "typemorph/dex/dex_analyzer.hpp"
 #include "typemorph/vb/vb_analyzer.hpp"
 #include "typemorph/autoit/autoit_decompiler.hpp"
+#include "typemorph/unpack/vfs_extractor.hpp"
 #ifdef _WIN32
 #include "typemorph/gui/studio_app.hpp"
 #endif
@@ -740,6 +741,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph autoit <binary> [--out=script.au3] [--json]\n"
                "AutoIt v3 Script Extractor & Decompiler (Exe2Aut engine): extracts embedded .au3 scripts and decodes tokens.\n";
     }
+    if (command == "vfs-extract" || command == "spoondec" || command == "evbunpack") {
+        return "Usage: typemorph vfs-extract <binary> [--json]\n"
+               "Virtual Filesystem (VFS) Extractor (spoondec / evbunpack): extracts virtual files & registry from Spoon Studio, Enigma Virtual Box, and BoxedApp.\n";
+    }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
                "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
@@ -761,6 +766,7 @@ std::string command_help(std::string_view command) {
            "  dex <classes.dex>    Android Dalvik DEX & Java decompiler engine (JADX style)\n"
            "  vb <binary>          Visual Basic 5.0/6.0 P-Code & Native analyzer (VB Decompiler)\n"
            "  autoit <binary>      AutoIt v3 Script Extractor & token decompiler (Exe2Aut)\n"
+           "  vfs-extract <bin>    Virtual Filesystem Extractor (Spoon Studio, Enigma Virtual Box, BoxedApp)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
@@ -3979,6 +3985,29 @@ int command_autoit(const Arguments& args, std::ostream& out, std::ostream& err) 
     return 0;
 }
 
+int command_vfs_extract(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("vfs-extract");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph vfs-extract: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto rep = unpack::VfsExtractor::analyze(view.value());
+    if (!rep.is_container) {
+        err << "typemorph vfs-extract: no application virtualization container signatures found in " << path << ".\n";
+        return 1;
+    }
+
+    out << unpack::VfsExtractor::format_report(rep);
+    return 0;
+}
+
 
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -5279,6 +5308,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_autoit(parsed.value(), out_, err_);
+    }
+    if (command == "vfs-extract" || command == "spoondec" || command == "evbunpack") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_vfs_extract(parsed.value(), out_, err_);
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {

@@ -407,6 +407,12 @@ TEST_CASE("cli: autoit displays help") {
     CHECK(help_res.out.find("AutoIt v3") != std::string::npos);
 }
 
+TEST_CASE("cli: vfs-extract displays help") {
+    const auto help_res = invoke({"vfs-extract", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("Virtual Filesystem") != std::string::npos);
+}
+
 
 
 
