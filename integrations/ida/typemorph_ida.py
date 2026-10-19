@@ -509,6 +509,25 @@ class TypeMorphIdaSync:
         sigs = data.get("signatures", [])
         print(f"[TypeMorph IDA] Dumped {len(sigs)} subroutine prototype(s)")
 
+    def sync_dotnet_clean(self) -> None:
+        """Advanced .NET Deobfuscator: inlines proxies, decrypts strings, and kills switches."""
+        print(f"[TypeMorph IDA] Running .NET deobfuscator (dotnet-clean): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "dotnet-clean", self.target_path)
+        if not data or not data.get("is_dotnet"):
+            return
+        protector = data.get("protector", "None")
+        proxies = data.get("total_proxies_inlined", 0)
+        strings = data.get("total_strings_decrypted", 0)
+        switches = data.get("total_switches_killed", 0)
+        print(f"[TypeMorph IDA] Protector: {protector} | Inlined: {proxies} | Decrypted: {strings} | Switches: {switches}")
+        if IN_IDA:
+            for ds in data.get("decrypted_strings", []):
+                off = ds.get("offset", 0)
+                val = ds.get("value", "")
+                if off and val:
+                    ea = ida_nalt.get_imagebase() + off
+                    ida_bytes.set_cmt(ea, f"[TypeMorph .NET String] \"{val}\"", False)
+
     def run_all(self) -> None:
         self.sync_detect()
         self.sync_fixiat()

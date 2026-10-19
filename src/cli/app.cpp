@@ -29,6 +29,7 @@
 #include "typemorph/rtti/rtti_analyzer.hpp"
 #include "typemorph/security/security_analyzer.hpp"
 #include "typemorph/dotnet/dotnet_analyzer.hpp"
+#include "typemorph/dotnet/dotnet_deobf.hpp"
 #include "typemorph/decompile/c_decompiler.hpp"
 #include "typemorph/derust/rust_source.hpp"
 #include "typemorph/detect/detect_engine.hpp"
@@ -161,7 +162,7 @@ Result<Arguments> parse_arguments(std::span<const std::string_view> args,
         parsed.positional.emplace_back(argument);
     }
 
-    if (parsed.positional.size() < min_positional) {
+    if (!parsed.has("help") && parsed.positional.size() < min_positional) {
         return make_error(ErrorCode::invalid_argument, "missing required argument");
     }
     if (parsed.positional.size() > max_positional) {
@@ -702,6 +703,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph dumpsubs <binary> [--out=subs.csv] [--min-size=N] [--json]\n"
                "Dump Subroutines: extracts all function addresses, sizes, names, calling conventions, and prototypes into CSV/JSON.\n";
     }
+    if (command == "dotnet-clean" || command == "dotnet-deobf" || command == "deobf-dotnet") {
+        return "Usage: typemorph dotnet-clean <assembly.exe> [--out=clean.cs] [--json]\n"
+               "Advanced .NET Deobfuscator: inlines ConfuserEx/.NET Reactor proxy calls, decrypts strings, and kills switch dispatchers.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -713,6 +718,7 @@ std::string command_help(std::string_view command) {
            "  rust <binary>        Rust semantic recovery\n"
            "  decompile <binary>   Structured C / Rust decompiler & struct layout reconstructor\n"
            "  csharp <binary>      .NET / CLR assembly metadata extractor & C# code decompiler\n"
+           "  dotnet-clean <bin>   Advanced .NET deobfuscator (inlines proxies, decrypts strings, kills switch)\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
            "  fixiat <dump.exe>    Reconstruct PE Import Address Table (IAT) & rebuild import directory\n"
            "  hybrid <binary>      Infer an embedded executable section\n"
@@ -3613,6 +3619,101 @@ int command_dumpsubs(const Arguments& args, std::ostream& out, std::ostream& err
     return 0;
 }
 
+JsonValue dotnet_deobf_report_to_json(const std::string& path, const dotnet::DotNetDeobfReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["is_dotnet"] = JsonValue(rep.is_dotnet);
+    doc["protector"] = JsonValue(std::string(dotnet::to_string(rep.detected_protector)));
+    doc["protector_details"] = JsonValue(rep.protector_details);
+    doc["total_proxies_inlined"] = JsonValue(static_cast<std::uint64_t>(rep.total_proxies_inlined));
+    doc["total_strings_decrypted"] = JsonValue(static_cast<std::uint64_t>(rep.total_strings_decrypted));
+    doc["total_switches_killed"] = JsonValue(static_cast<std::uint64_t>(rep.total_switches_killed));
+    doc["clean_csharp_source"] = JsonValue(rep.clean_csharp_source);
+
+    JsonValue proxies_arr = JsonValue::array();
+    for (const auto& p : rep.inlined_proxies) {
+        JsonValue item = JsonValue::object();
+        item["proxy"] = JsonValue(p.proxy_method_name);
+        item["target_name"] = JsonValue(p.target_name);
+        item["target_type"] = JsonValue(p.target_type);
+        item["target_token"] = JsonValue(static_cast<std::uint64_t>(p.target_token));
+        proxies_arr.push(std::move(item));
+    }
+    doc["inlined_proxies"] = std::move(proxies_arr);
+
+    JsonValue strings_arr = JsonValue::array();
+    for (const auto& s : rep.decrypted_strings) {
+        JsonValue item = JsonValue::object();
+        item["token"] = JsonValue(static_cast<std::uint64_t>(s.token));
+        item["algorithm"] = JsonValue(s.algorithm);
+        item["value"] = JsonValue(s.decrypted_value);
+        item["offset"] = JsonValue(s.call_site_offset);
+        strings_arr.push(std::move(item));
+    }
+    doc["decrypted_strings"] = std::move(strings_arr);
+
+    JsonValue methods_arr = JsonValue::array();
+    for (const auto& m : rep.reconstructed_methods) {
+        JsonValue item = JsonValue::object();
+        item["method"] = JsonValue(m.method_name);
+        item["cases"] = JsonValue(static_cast<std::uint64_t>(m.switch_table_cases));
+        item["strategy"] = JsonValue(m.strategy);
+        methods_arr.push(std::move(item));
+    }
+    doc["flattened_methods"] = std::move(methods_arr);
+
+    return doc;
+}
+
+int command_dotnet_clean(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("dotnet-clean");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph dotnet-clean: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto img_res = core::ExecutableImage::parse(view.value());
+    if (!img_res) {
+        err << "typemorph dotnet-clean: " << format_error(img_res.error()) << '\n';
+        return 1;
+    }
+
+    dotnet::DotNetDeobfuscator deobfuscator;
+    dotnet::DotNetDeobfReport rep = deobfuscator.deobfuscate(img_res.value());
+
+    if (!rep.is_dotnet) {
+        err << "typemorph dotnet-clean: file is not a valid .NET / CLI executable\n";
+        return 1;
+    }
+
+    if (args.has("json")) {
+        auto doc = dotnet_deobf_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    if (auto out_path = args.get("out")) {
+        auto wr = write_file(*out_path, rep.clean_csharp_source);
+        if (!wr) {
+            err << "typemorph dotnet-clean: failed to write: " << *out_path << '\n';
+            return 1;
+        }
+        out << dotnet::DotNetDeobfuscator::to_text_summary(rep) << "\n";
+        out << "Clean C# source written to: " << *out_path << "\n";
+        return 0;
+    }
+
+    out << dotnet::DotNetDeobfuscator::to_text_summary(rep) << "\n";
+    out << rep.clean_csharp_source << "\n";
+    return 0;
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -3710,6 +3811,7 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("abi"));
         capabilities.push(JsonValue("csharp"));
         capabilities.push(JsonValue("dotnet"));
+        capabilities.push(JsonValue("dotnet-clean"));
         capabilities.push(JsonValue("decompile"));
         result["capabilities"] = std::move(capabilities);
         return result;
@@ -4312,6 +4414,19 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         rep.csharp_source = dotnet::DotNetAnalyzer::to_csharp(rep);
         return dotnet_report_to_json(file.value(), rep);
     }
+    if (method == "dotnet-clean" || method == "typemorph.dotnet-clean" ||
+        method == "dotnet-deobf" || method == "typemorph.dotnet-deobf" ||
+        method == "deobf-dotnet" || method == "typemorph.deobf-dotnet") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto img_res = core::ExecutableImage::parse(view_result.value());
+        if (!img_res) return img_res.error();
+        dotnet::DotNetDeobfuscator deobfuscator;
+        auto rep = deobfuscator.deobfuscate(img_res.value());
+        return dotnet_deobf_report_to_json(file.value(), rep);
+    }
     if (method == "decompile" || method == "typemorph.decompile") {
         auto file = json_string_field(params, "file");
         if (!file) return file.error();
@@ -4807,6 +4922,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_dumpsubs(parsed.value(), out_, err_);
+    }
+    if (command == "dotnet-clean" || command == "dotnet-deobf" || command == "deobf-dotnet") {
+        auto parsed = parse_arguments(
+            rest, {"out"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_dotnet_clean(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

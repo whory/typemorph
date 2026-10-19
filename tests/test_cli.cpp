@@ -346,6 +346,18 @@ TEST_CASE("cli: dumpsubs dumps subroutines to CSV and JSON") {
     CHECK(parsed.value().find("signatures") != nullptr);
 }
 
+TEST_CASE("cli: dotnet-clean handles non-dotnet or dotnet binaries") {
+    const auto res = invoke({"dotnet-clean", fixture_path("rust_sample.elf")});
+    // rust_sample.elf is not .NET so returns 1 with error message
+    CHECK_EQ(res.exit_code, 1);
+    CHECK(res.err.find(".NET") != std::string::npos);
+
+    const auto help_res = invoke({"dotnet-clean", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("dotnet-clean") != std::string::npos);
+}
+
+
 
 
 

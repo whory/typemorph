@@ -195,6 +195,10 @@ typemorph applycalletype target.exe
 # Dump Subroutines: export all functions, calling conventions, stack frames to CSV/JSON
 typemorph dumpsubs target.exe --out=functions.csv --min-size=16
 
+# Advanced .NET Deobfuscator: inlines ConfuserEx / .NET Reactor proxies, decrypts strings, kills switch
+typemorph dotnet-clean target.exe
+typemorph dotnet-clean target.exe --out=CleanSource.cs
+
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe
 
