@@ -40,8 +40,12 @@ Ghidra/IDA/editor integration.
   * **Devirtualizer**: detects VM bytecode interpreters, maps jump tables, and extracts opcode -> handler routines.
 - **Three complete emitters** — Kaitai Struct 0.10 YAML, ImHex pattern language,
   and compilable C++20 headers, generated from the same recovered AST.
-- **Ghidra & IDA Pro Plugins** — out-of-the-box Python integrations in `integrations/` sync demangled symbols, vtable structs, revealed strings, and VM handlers directly into your decompiler.
-- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`,
+- **Full RE Suite Integrations** — out-of-the-box scripts and plugins in `integrations/`:
+  * **Ghidra**: `integrations/ghidra/typemorph_sync.py` (Python 3 / Ghidrathon / PyGhidra)
+  * **IDA Pro**: `integrations/ida/typemorph_ida.py` (IDAPython for IDA 7.x/8.x/9.x)
+  * **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binja API v3/v4 plugin)
+  * **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
+- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `entropy`, `sig`,
   `serve`) and an ANSI terminal dashboard with hex/entropy heat map, collapsible AST, and live preview.
 - **Zero required third-party dependencies** — the analysis core, executable
   parser, JSON-RPC, TUI, and test harness are self-contained, so air-gapped RE
@@ -125,15 +129,21 @@ typemorph strings sample.bin --min-len=4
 # Devirtualize bytecode interpreter & extract handler jump tables
 typemorph devirt target.exe
 
+# Terminal ASCII Shannon entropy visualizer & packed section detector
+typemorph entropy sample.bin --block-size=64
+
+# Automated YARA signature rule generator
+typemorph sig sample.bin --name=malware_family --out=rule.yar
+
 # JSON-RPC 2.0 daemon (one request per line, for Ghidra/IDA/editor plugins)
 typemorph serve --stdio
 ```
 
 Every subcommand supports `--json` for machine-readable output.
 
-### Ghidra & IDA Pro Plugins
+### RE Suite Integrations (Ghidra, IDA Pro, Binary Ninja, Radare2)
 
-Run the sync scripts directly in Ghidra's Script Manager or IDA's Python terminal:
+Run the sync scripts directly in your disassembler / decompiler environment:
 
 ```bash
 # Ghidra sync
@@ -141,6 +151,12 @@ python integrations/ghidra/typemorph_sync.py path/to/binary
 
 # IDA Pro sync
 python integrations/ida/typemorph_ida.py path/to/binary
+
+# Binary Ninja sync
+python integrations/binaryninja/typemorph_binja.py path/to/binary
+
+# Radare2 / Cutter sync
+python integrations/r2/typemorph_r2.py path/to/binary
 ```
 
 ### JSON-RPC example
@@ -152,7 +168,7 @@ python integrations/ida/typemorph_ida.py path/to/binary
 }}
 ```
 
-Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`
+Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `entropy`, `sig`
 (also namespaced as `typemorph.*`). Notifications (requests without `id`) are
 executed without a reply, per JSON-RPC 2.0.
 

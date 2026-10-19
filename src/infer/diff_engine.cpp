@@ -1379,6 +1379,8 @@ struct StructuralEvidence {
             inferred.count_field_offset = array->count_field_offset;
             inferred.element_count = array->count;
             inferred.type_name = "array";
+        } else if (const auto* str = field.type->get_if<core::StringNode>()) {
+            inferred.type_name = "string";
         } else if (field.type->is<core::StructNode>()) {
             inferred.type_name = "struct";
         } else {
@@ -1439,6 +1441,8 @@ struct StructuralEvidence {
         inferred.array_element_size = array->element_stride;
         inferred.count_field_offset = array->count_field_offset;
         inferred.element_count = array->count;
+    } else if (const auto* str = field.type->get_if<core::StringNode>()) {
+        inferred.type_name = "string";
     } else if (field.type->is<core::StructNode>()) {
         inferred.type_name = "struct";
     } else {

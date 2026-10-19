@@ -602,6 +602,14 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph devirt <binary> [--min-handlers=N] [--json]\n"
                "Analyze VM bytecode interpreter dispatch loops and handler jump tables.\n";
     }
+    if (command == "entropy") {
+        return "Usage: typemorph entropy <file> [--block-size=N] [--json]\n"
+               "Calculate Shannon entropy distribution and highlight packed/encrypted zones.\n";
+    }
+    if (command == "sig") {
+        return "Usage: typemorph sig <binary> [--name=RULE_NAME] [--out=FILE] [--json]\n"
+               "Generate a high-fidelity YARA signature rule matching invariants and strings.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -615,6 +623,8 @@ std::string command_help(std::string_view command) {
            "  unxor <file>         XOR key discovery and deobfuscation\n"
            "  strings <file>       String revealer (ASCII, UTF-16, stack, XOR)\n"
            "  devirt <binary>      Devirtualizer (VM dispatchers & handlers)\n"
+           "  entropy <file>       Shannon entropy graph & high-density zones\n"
+           "  sig <binary>         Generate YARA rule from invariants & strings\n"
            "  serve --stdio        JSON-RPC daemon on stdio\n"
            "  version              Print version\n"
            "  help [command]       Show help\n";
@@ -1211,6 +1221,296 @@ int command_devirt(const Arguments& args, std::ostream& out, std::ostream& err) 
     return 0;
 }
 
+int command_entropy(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help")) {
+        out << command_help("entropy");
+        return 0;
+    }
+    if (args.positional.empty()) {
+        err << usage_error("entropy requires a target file") << '\n';
+        return 2;
+    }
+    const std::string& path = args.positional.front();
+    auto view_result = BinaryView::open(path);
+    if (!view_result) {
+        err << "TypeMorph: " << format_error(view_result.error()) << '\n';
+        return 1;
+    }
+    const auto& view = view_result.value();
+    if (view.empty()) {
+        err << "TypeMorph: file is empty: " << path << '\n';
+        return 1;
+    }
+
+    std::size_t block_size = 512;
+    if (auto val = args.get("block-size")) {
+        auto parsed = parse_u64(*val, "block-size");
+        if (!parsed) {
+            err << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        block_size = static_cast<std::size_t>(parsed.value());
+        if (block_size == 0) block_size = 512;
+    } else {
+        if (view.size() > 48 * 512) {
+            block_size = (view.size() + 31) / 32;
+            block_size = ((block_size + 63) / 64) * 64;
+        } else if (view.size() < 16 * 512) {
+            block_size = std::max<std::size_t>(16, view.size() / 16);
+        }
+    }
+
+    auto blocks_res = core::block_entropy(view.bytes(), block_size);
+    if (!blocks_res) {
+        err << "TypeMorph: " << format_error(blocks_res.error()) << '\n';
+        return 1;
+    }
+    const auto& blocks = blocks_res.value();
+    const double total_entropy = core::shannon_entropy(view.bytes());
+
+    double min_ent = 8.0;
+    double max_ent = 0.0;
+    double sum_ent = 0.0;
+    for (double ent : blocks) {
+        if (ent < min_ent) min_ent = ent;
+        if (ent > max_ent) max_ent = ent;
+        sum_ent += ent;
+    }
+    const double mean_ent = blocks.empty() ? 0.0 : sum_ent / static_cast<double>(blocks.size());
+
+    struct Range {
+        std::uint64_t start = 0;
+        std::uint64_t end = 0;
+        double sum = 0.0;
+        std::size_t count = 0;
+    };
+    std::vector<Range> high_ranges;
+    Range current_high;
+    bool in_high = false;
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(i) * block_size;
+        const std::uint64_t end = std::min<std::uint64_t>(offset + block_size, view.size());
+        if (blocks[i] >= 7.20) {
+            if (!in_high) {
+                in_high = true;
+                current_high.start = offset;
+                current_high.end = end;
+                current_high.sum = blocks[i];
+                current_high.count = 1;
+            } else {
+                current_high.end = end;
+                current_high.sum += blocks[i];
+                current_high.count += 1;
+            }
+        } else {
+            if (in_high) {
+                high_ranges.push_back(current_high);
+                in_high = false;
+            }
+        }
+    }
+    if (in_high) {
+        high_ranges.push_back(current_high);
+    }
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(path);
+        doc["size"] = JsonValue(view.size());
+        doc["total_entropy"] = JsonValue(total_entropy);
+        doc["min_entropy"] = JsonValue(min_ent);
+        doc["max_entropy"] = JsonValue(max_ent);
+        doc["mean_entropy"] = JsonValue(mean_ent);
+        doc["block_size"] = JsonValue(static_cast<std::uint64_t>(block_size));
+
+        JsonValue json_blocks = JsonValue::array();
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            JsonValue b = JsonValue::object();
+            const std::uint64_t offset = static_cast<std::uint64_t>(i) * block_size;
+            const std::uint64_t end = std::min<std::uint64_t>(offset + block_size, view.size());
+            b["offset"] = JsonValue(offset);
+            b["size"] = JsonValue(end - offset);
+            b["entropy"] = JsonValue(blocks[i]);
+            b["classification"] = JsonValue(std::string(core::entropy_label(blocks[i])));
+            json_blocks.push(std::move(b));
+        }
+        doc["blocks"] = std::move(json_blocks);
+
+        JsonValue json_high = JsonValue::array();
+        for (const auto& r : high_ranges) {
+            JsonValue hr = JsonValue::object();
+            hr["offset"] = JsonValue(r.start);
+            hr["size"] = JsonValue(r.end - r.start);
+            hr["mean_entropy"] = JsonValue(r.count == 0 ? 0.0 : r.sum / static_cast<double>(r.count));
+            json_high.push(std::move(hr));
+        }
+        doc["high_entropy_ranges"] = std::move(json_high);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph Entropy Analysis: " << path << " (" << view.size() << " bytes)\n"
+        << "Total Entropy: " << std::fixed << std::setprecision(2) << total_entropy
+        << " / 8.00 bits/byte | Block size: " << block_size << " bytes\n"
+        << "Range: [" << min_ent << " .. " << max_ent << "], Mean: " << mean_ent << " bits/byte\n"
+        << "--------------------------------------------------------------------------------\n"
+        << "Offset Range               Entropy Bar                  Bits/B  Class\n"
+        << "--------------------------------------------------------------------------------\n";
+
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(i) * block_size;
+        const std::uint64_t end = std::min<std::uint64_t>(offset + block_size, view.size());
+        const double ent = blocks[i];
+        const int filled = std::clamp(static_cast<int>(std::round((ent / 8.0) * 24.0)), 0, 24);
+        std::string bar(filled, '#');
+        bar.append(24 - filled, '.');
+
+        char range_buf[64];
+        std::snprintf(range_buf, sizeof(range_buf), "0x%08llx - 0x%08llx",
+                      static_cast<unsigned long long>(offset),
+                      static_cast<unsigned long long>(end > 0 ? end - 1 : 0));
+
+        out << range_buf << "  [" << bar << "]  " << std::fixed << std::setprecision(2) << ent << "   "
+            << core::entropy_label(ent);
+        if (ent >= 7.20) {
+            out << " [HIGH]";
+        }
+        out << '\n';
+    }
+    out << "--------------------------------------------------------------------------------\n";
+    if (!high_ranges.empty()) {
+        out << "Detected " << high_ranges.size() << " High-Entropy Zone(s) (>= 7.20 bits/byte):\n";
+        for (const auto& r : high_ranges) {
+            const double avg = r.count == 0 ? 0.0 : r.sum / static_cast<double>(r.count);
+            char r_buf[64];
+            std::snprintf(r_buf, sizeof(r_buf), "  * 0x%08llx - 0x%08llx",
+                          static_cast<unsigned long long>(r.start),
+                          static_cast<unsigned long long>(r.end > 0 ? r.end - 1 : 0));
+            out << r_buf << " (" << (r.end - r.start) << " B, avg " << std::fixed
+                << std::setprecision(2) << avg << " bits/byte) -> Packed, compressed, or encrypted\n";
+        }
+    } else {
+        out << "No packed or encrypted high-entropy zones detected (all blocks < 7.20 bits/byte).\n";
+    }
+    return 0;
+}
+
+int command_sig(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help")) {
+        out << command_help("sig");
+        return 0;
+    }
+    if (args.positional.empty()) {
+        err << usage_error("sig requires a target binary") << '\n';
+        return 2;
+    }
+    const std::string& path = args.positional.front();
+    auto view_result = BinaryView::open(path);
+    if (!view_result) {
+        err << "TypeMorph: " << format_error(view_result.error()) << '\n';
+        return 1;
+    }
+    const auto& view = view_result.value();
+    if (view.empty()) {
+        err << "TypeMorph: file is empty: " << path << '\n';
+        return 1;
+    }
+
+    std::string rule_name = args.get_or("name", "");
+    if (rule_name.empty()) {
+        std::filesystem::path p(path);
+        std::string stem = p.stem().string();
+        for (char c : stem) {
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+                rule_name.push_back(c);
+            } else {
+                rule_name.push_back('_');
+            }
+        }
+        if (rule_name.empty() || std::isdigit(static_cast<unsigned char>(rule_name.front()))) {
+            rule_name = "typemorph_" + rule_name;
+        }
+    }
+
+    std::string magic_hex;
+    if (view.size() >= 4) {
+        auto slice = view.slice_unchecked(0, 4);
+        magic_hex = to_hex_string(slice);
+    }
+
+    deobf::StringScanOptions str_opts;
+    str_opts.min_length = 5;
+    deobf::StringRevealer revealer(str_opts);
+    auto extracted = revealer.extract(view);
+
+    std::vector<std::string> rule_strings;
+    for (const auto& s : extracted) {
+        if (s.value.size() >= 6 && s.confidence >= 0.85) {
+            rule_strings.push_back(s.value);
+            if (rule_strings.size() >= 6) break;
+        }
+    }
+
+    std::ostringstream yara;
+    yara << "rule " << rule_name << " {\n"
+         << "    meta:\n"
+         << "        description = \"Generated by TypeMorph Binary Signature Engine\"\n"
+         << "        generator = \"TypeMorph " << kVersion << "\"\n"
+         << "        target_file = \"" << json_escape(path) << "\"\n"
+         << "        target_size = " << view.size() << "\n"
+         << "    strings:\n";
+
+    if (!magic_hex.empty()) {
+        yara << "        $magic = { ";
+        for (std::size_t i = 0; i < magic_hex.size(); i += 2) {
+            yara << magic_hex[i] << magic_hex[i + 1] << " ";
+        }
+        yara << "} // offset 0x0\n";
+    }
+
+    int str_idx = 0;
+    for (const auto& str_val : rule_strings) {
+        yara << "        $s" << str_idx++ << " = \"" << json_escape(str_val) << "\" ascii\n";
+    }
+
+    yara << "    condition:\n";
+    if (!magic_hex.empty()) {
+        yara << "        $magic at 0";
+        if (!rule_strings.empty()) {
+            yara << " and " << (rule_strings.size() > 2 ? "2 of ($s*)" : "all of ($s*)");
+        }
+    } else if (!rule_strings.empty()) {
+        yara << "        " << (rule_strings.size() > 2 ? "2 of ($s*)" : "all of ($s*)");
+    } else {
+        yara << "        filesize == " << view.size();
+    }
+    yara << "\n}\n";
+
+    const std::string rule_text = yara.str();
+
+    if (auto out_path = args.get("out")) {
+        auto written = write_file(*out_path, rule_text);
+        if (!written) {
+            err << "TypeMorph: " << format_error(written.error()) << '\n';
+            return 1;
+        }
+        err << "TypeMorph: wrote YARA signature to " << *out_path << '\n';
+    }
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["rule_name"] = JsonValue(rule_name);
+        doc["target_file"] = JsonValue(path);
+        doc["target_size"] = JsonValue(view.size());
+        doc["yara_rule"] = JsonValue(rule_text);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << rule_text;
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -1291,6 +1591,8 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("unxor"));
         capabilities.push(JsonValue("strings"));
         capabilities.push(JsonValue("devirt"));
+        capabilities.push(JsonValue("entropy"));
+        capabilities.push(JsonValue("sig"));
         result["capabilities"] = std::move(capabilities);
         return result;
     }
@@ -1490,6 +1792,125 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         result["instances"] = devirt_instances_to_json(instances);
         return result;
     }
+    if (method == "entropy" || method == "typemorph.entropy") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        const auto& view = view_result.value();
+        std::size_t block_size = 512;
+        if (const auto* bs = params.find("block_size")) {
+            if (const auto number = bs->as_int()) block_size = static_cast<std::size_t>(*number);
+        } else {
+            if (view.size() > 48 * 512) {
+                block_size = (view.size() + 31) / 32;
+                block_size = ((block_size + 63) / 64) * 64;
+            } else if (view.size() < 16 * 512) {
+                block_size = std::max<std::size_t>(16, view.size() / 16);
+            }
+        }
+        auto blocks_res = core::block_entropy(view.bytes(), block_size);
+        if (!blocks_res) return blocks_res.error();
+        const auto& blocks = blocks_res.value();
+        const double total_entropy = core::shannon_entropy(view.bytes());
+        double min_ent = 8.0, max_ent = 0.0, sum_ent = 0.0;
+        for (double ent : blocks) {
+            if (ent < min_ent) min_ent = ent;
+            if (ent > max_ent) max_ent = ent;
+            sum_ent += ent;
+        }
+        const double mean_ent = blocks.empty() ? 0.0 : sum_ent / static_cast<double>(blocks.size());
+
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(file.value());
+        doc["size"] = JsonValue(view.size());
+        doc["total_entropy"] = JsonValue(total_entropy);
+        doc["min_entropy"] = JsonValue(min_ent);
+        doc["max_entropy"] = JsonValue(max_ent);
+        doc["mean_entropy"] = JsonValue(mean_ent);
+        doc["block_size"] = JsonValue(static_cast<std::uint64_t>(block_size));
+        JsonValue json_blocks = JsonValue::array();
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            JsonValue b = JsonValue::object();
+            const std::uint64_t offset = static_cast<std::uint64_t>(i) * block_size;
+            const std::uint64_t end = std::min<std::uint64_t>(offset + block_size, view.size());
+            b["offset"] = JsonValue(offset);
+            b["size"] = JsonValue(end - offset);
+            b["entropy"] = JsonValue(blocks[i]);
+            b["classification"] = JsonValue(std::string(core::entropy_label(blocks[i])));
+            json_blocks.push(std::move(b));
+        }
+        doc["blocks"] = std::move(json_blocks);
+        return doc;
+    }
+    if (method == "sig" || method == "typemorph.sig") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        const auto& view = view_result.value();
+        std::string rule_name = json_string_field(params, "name", false).value_or("");
+        if (rule_name.empty()) {
+            std::filesystem::path p(file.value());
+            std::string stem = p.stem().string();
+            for (char c : stem) {
+                if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') rule_name.push_back(c);
+                else rule_name.push_back('_');
+            }
+            if (rule_name.empty() || std::isdigit(static_cast<unsigned char>(rule_name.front()))) {
+                rule_name = "typemorph_" + rule_name;
+            }
+        }
+        std::string magic_hex;
+        if (view.size() >= 4) {
+            auto slice = view.slice_unchecked(0, 4);
+            magic_hex = to_hex_string(slice);
+        }
+        deobf::StringScanOptions str_opts;
+        str_opts.min_length = 5;
+        deobf::StringRevealer revealer(str_opts);
+        auto extracted = revealer.extract(view);
+        std::vector<std::string> rule_strings;
+        for (const auto& s : extracted) {
+            if (s.value.size() >= 6 && s.confidence >= 0.85) {
+                rule_strings.push_back(s.value);
+                if (rule_strings.size() >= 6) break;
+            }
+        }
+        std::ostringstream yara;
+        yara << "rule " << rule_name << " {\n"
+             << "    meta:\n"
+             << "        description = \"Generated by TypeMorph Binary Signature Engine\"\n"
+             << "        generator = \"TypeMorph " << kVersion << "\"\n"
+             << "        target_file = \"" << json_escape(file.value()) << "\"\n"
+             << "        target_size = " << view.size() << "\n"
+             << "    strings:\n";
+        if (!magic_hex.empty()) {
+            yara << "        $magic = { ";
+            for (std::size_t i = 0; i < magic_hex.size(); i += 2) yara << magic_hex[i] << magic_hex[i + 1] << " ";
+            yara << "} // offset 0x0\n";
+        }
+        int str_idx = 0;
+        for (const auto& str_val : rule_strings) {
+            yara << "        $s" << str_idx++ << " = \"" << json_escape(str_val) << "\" ascii\n";
+        }
+        yara << "    condition:\n";
+        if (!magic_hex.empty()) {
+            yara << "        $magic at 0";
+            if (!rule_strings.empty()) yara << " and " << (rule_strings.size() > 2 ? "2 of ($s*)" : "all of ($s*)");
+        } else if (!rule_strings.empty()) {
+            yara << "        " << (rule_strings.size() > 2 ? "2 of ($s*)" : "all of ($s*)");
+        } else {
+            yara << "        filesize == " << view.size();
+        }
+        yara << "\n}\n";
+        JsonValue doc = JsonValue::object();
+        doc["rule_name"] = JsonValue(rule_name);
+        doc["target_file"] = JsonValue(file.value());
+        doc["target_size"] = JsonValue(view.size());
+        doc["yara_rule"] = JsonValue(yara.str());
+        return doc;
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -1659,6 +2080,26 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_devirt(parsed.value(), out_, err_);
+    }
+    if (command == "entropy") {
+        auto parsed = parse_arguments(
+            rest, {"block-size"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_entropy(parsed.value(), out_, err_);
+    }
+    if (command == "sig") {
+        auto parsed = parse_arguments(
+            rest, {"name", "out"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_sig(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

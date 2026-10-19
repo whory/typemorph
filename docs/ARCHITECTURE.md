@@ -84,15 +84,26 @@ Confidence is a product of independent evidence; the CLI's
    - Function prologue validation: verifies code pointers against known x86/x64 prologs (`push rbp`, `mov rbp, rsp`, `sub rsp`, `endbr64`).
    - VM dispatcher identification: maps opcode indices to routine entry points and traces candidate bytecode streams.
 
-## Ghidra & IDA Pro Integrations
+4. **Entropy Analysis Engine (`typemorph::core::calculate_entropy`)**:
+   - Calculates exact Shannon entropy in bits per byte over sliding windows or uniform blocks.
+   - Categorizes regions into `zero`/`sparse` (<1.0), `structured`/`code` (1.0-6.0), `compressed`/`text` (6.0-7.2), and `encrypted`/`packed` (>7.2).
+   - Renders ASCII bar visualizations in CLI and density heat maps in TUI.
+5. **YARA Signature Generation Engine**:
+   - Synthesizes robust detection rules matching invariant format magics, high-confidence recovered strings, and jump table entry points.
+   - Outputs ready-to-deploy `.yar` rule files with structural conditions.
 
-- Located in `integrations/ghidra/typemorph_sync.py` and `integrations/ida/typemorph_ida.py`.
+## RE Suite Integrations
+
+- **Ghidra**: `integrations/ghidra/typemorph_sync.py` (Python 3 / Ghidrathon / PyGhidra)
+- **IDA Pro**: `integrations/ida/typemorph_ida.py` (IDAPython for IDA 7.x/8.x/9.x)
+- **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binary Ninja API v3/v4 plugin)
+- **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
 - Connects either standalone or through `typemorph serve --stdio` JSON-RPC.
 - Automatically renames subroutines from demangled Rust symbols, populates structure definitions for Rust trait vtables, adds comments for string slice pairs and stack strings, and labels VM dispatcher handlers.
 
 ## CLI / JSON-RPC
 
-`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `serve`), builds engine options, and
+`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `entropy`, `sig`, `serve`), builds engine options, and
 delegates to `KaitaiEmitter`/etc. `serve --stdio` performs line-delimited
 JSON-RPC 2.0 using the same helpers, so protocol and CLI behavior cannot drift.
 JSON is produced by the built-in `JsonValue` writer (or nlohmann/json when

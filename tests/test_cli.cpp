@@ -222,3 +222,31 @@ TEST_CASE("cli: devirt analyzes executable and reports VM instances") {
     CHECK(text_res.out.find("Devirtualizer") != std::string::npos);
 }
 
+TEST_CASE("cli: entropy displays distribution graph and outputs JSON") {
+    const auto text_res = invoke({"entropy", fixture_path("sample_v1.bin")});
+    CHECK_EQ(text_res.exit_code, 0);
+    CHECK(text_res.out.find("Entropy Analysis") != std::string::npos);
+    CHECK(text_res.out.find("Total Entropy") != std::string::npos);
+
+    const auto json_res = invoke({"entropy", fixture_path("sample_v1.bin"), "--block-size=16", "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("total_entropy") != nullptr);
+    CHECK(parsed.value().find("blocks") != nullptr);
+}
+
+TEST_CASE("cli: sig generates valid YARA signature") {
+    const auto text_res = invoke({"sig", fixture_path("sample_v1.bin"), "--name=custom_sig"});
+    CHECK_EQ(text_res.exit_code, 0);
+    CHECK(text_res.out.find("rule custom_sig") != std::string::npos);
+    CHECK(text_res.out.find("condition:") != std::string::npos);
+
+    const auto json_res = invoke({"sig", fixture_path("sample_v1.bin"), "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("yara_rule") != nullptr);
+}
+
+
