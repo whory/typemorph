@@ -431,8 +431,32 @@ class BinaryNinjaSync:
             if ep:
                 self.bv.set_comment_at(ep, f"[TypeMorph Detect]\nCompiler: {compiler}\nPacker: {packer}\nProtector: {protector}")
 
+    def sync_fixiat(self) -> None:
+        """Reconstruct PE IAT and define imported symbol thunks in Binary Ninja."""
+        print(f"[TypeMorph Binja] Analyzing & fixing IAT: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "fixiat", self.target_path)
+        if not data:
+            return
+        modules = data.get("modules", [])
+        total_apis = data.get("resolved_functions", 0)
+        print(f"[TypeMorph Binja] Reconstructed {len(modules)} modules with {total_apis} resolved APIs")
+        if self.bv:
+            for mod in modules:
+                mod_name = mod.get("module_name", "")
+                for fn in mod.get("functions", []):
+                    iat_va = fn.get("iat_va", 0)
+                    fn_name = fn.get("name", "")
+                    if iat_va and fn_name:
+                        sym = Symbol(SymbolType.ImportAddressSymbol, iat_va, f"__imp_{fn_name}")
+                        self.bv.define_auto_symbol(sym)
+                        cmt = f"Import: {mod_name}!{fn_name}"
+                        if fn.get("resolution_type") != "direct_va":
+                            cmt += f" ({fn.get('resolution_type')})"
+                        self.bv.set_comment_at(iat_va, cmt)
+
     def run_all(self) -> None:
         self.sync_detect()
+        self.sync_fixiat()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()

@@ -364,8 +364,27 @@ class R2Sync:
         if ep:
             self.cmd(f'CC "[TypeMorph Detect] {compiler} / {packer} / {protector}" @ {ep}')
 
+    def sync_fixiat(self) -> None:
+        """Reconstruct PE IAT and define flags/comments in Radare2."""
+        print(f"[TypeMorph R2] Analyzing & fixing IAT: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "fixiat", self.target_path)
+        if not data:
+            return
+        modules = data.get("modules", [])
+        total_apis = data.get("resolved_functions", 0)
+        print(f"[TypeMorph R2] Reconstructed {len(modules)} modules with {total_apis} resolved APIs")
+        for mod in modules:
+            mod_name = mod.get("module_name", "")
+            for fn in mod.get("functions", []):
+                iat_va = fn.get("iat_va", 0)
+                fn_name = fn.get("name", "")
+                if iat_va and fn_name:
+                    self.cmd(f"f sym.imp.{mod_name}_{fn_name} = {iat_va}")
+                    self.cmd(f'CC "Import: {mod_name}!{fn_name}" @ {iat_va}')
+
     def run_all(self) -> None:
         self.sync_detect()
+        self.sync_fixiat()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()

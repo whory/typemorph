@@ -157,6 +157,13 @@ Confidence is a product of independent evidence; the CLI's
    - Implements DIE-style (Detect It Easy) heuristic and signature pattern matching against binary entry point opcodes.
    - Identifies major compilers (MSVC, GCC, Clang, Delphi, FreePascal, Rust, Go), packers (UPX, ASPack, PECompact, Spoon Studio), protectors (VMProtect, Themida, Enigma, Armadillo, ConfuserEx, SmartAssembly, .NET Reactor), and installers (Inno Setup, NSIS, PyInstaller).
    - Correlates PE Rich headers, .NET CLI metadata headers, and section markers to provide a high-confidence forensic verdict (`typemorph detect`).
+21. **PE IAT Reconstruction & Import Table Fixer (`typemorph::pe::IatReconstructor`)**:
+   - Implements Scylla and VMPImportFixer inspired import reconstruction for memory dumps and packed binaries.
+   - Discovers candidate IAT thunk tables across memory sections by scanning for consecutive pointer runs.
+   - Traces obfuscated import redirection stubs (`jmp [rel32/abs64]`, `jmp imm`, `push imm; ret`, `mov rax/eax, imm; jmp/push-ret`).
+   - Resolves target addresses against internal Windows API database (`KERNEL32`, `ntdll`, `USER32`, `ADVAPI32`, `WS2_32`).
+   - Injects a fresh section (`.typem`), builds valid `IMAGE_IMPORT_DESCRIPTOR` arrays, OriginalFirstThunk (INT), FirstThunk (IAT), and hint/name strings, updating PE data directories and headers (`typemorph fixiat`).
+
 
 ## Emitters
 

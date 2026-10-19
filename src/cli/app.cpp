@@ -32,6 +32,7 @@
 #include "typemorph/decompile/c_decompiler.hpp"
 #include "typemorph/derust/rust_source.hpp"
 #include "typemorph/detect/detect_engine.hpp"
+#include "typemorph/pe/iat_reconstructor.hpp"
 #include "typemorph/tui/dashboard.hpp"
 
 #include <algorithm>
@@ -681,6 +682,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph detect <binary> [--json]\n"
                "Deep compiler, linker, packer, protector, and installer detection (DIE Engine style).\n";
     }
+    if (command == "fixiat" || command == "importfix") {
+        return "Usage: typemorph fixiat <dump.exe> [--out=fixed.exe] [--section=.typem] [--no-trace] [--json]\n"
+               "Reconstruct corrupted/dumped PE Import Address Tables (IAT), trace stubs, and rebuild PE import directory.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -693,6 +698,7 @@ std::string command_help(std::string_view command) {
            "  decompile <binary>   Structured C / Rust decompiler & struct layout reconstructor\n"
            "  csharp <binary>      .NET / CLR assembly metadata extractor & C# code decompiler\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
+           "  fixiat <dump.exe>    Reconstruct PE Import Address Table (IAT) & rebuild import directory\n"
            "  hybrid <binary>      Infer an embedded executable section\n"
            "  unxor <file>         XOR key discovery and deobfuscation\n"
            "  strings <file>       String revealer (ASCII, UTF-16, stack, XOR, base64)\n"
@@ -3029,6 +3035,117 @@ int command_detect(const Arguments& args, std::ostream& out, std::ostream& err) 
     return 0;
 }
 
+JsonValue fixiat_report_to_json(const std::string& path, const pe::IatReconstructionReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["success"] = JsonValue(rep.success);
+    doc["bits"] = JsonValue(static_cast<std::uint64_t>(rep.bits));
+    doc["image_base"] = JsonValue(rep.image_base);
+    doc["entry_point"] = JsonValue(rep.entry_point);
+    doc["original_import_rva"] = JsonValue(static_cast<std::uint64_t>(rep.original_import_rva));
+    doc["original_import_size"] = JsonValue(static_cast<std::uint64_t>(rep.original_import_size));
+    doc["original_import_valid"] = JsonValue(rep.original_import_valid);
+    doc["total_functions"] = JsonValue(static_cast<std::uint64_t>(rep.total_functions));
+    doc["resolved_functions"] = JsonValue(static_cast<std::uint64_t>(rep.resolved_functions));
+    doc["redirected_thunks"] = JsonValue(static_cast<std::uint64_t>(rep.redirected_thunks));
+    doc["binary_patched"] = JsonValue(rep.binary_patched);
+    if (rep.binary_patched) {
+        doc["new_import_rva"] = JsonValue(static_cast<std::uint64_t>(rep.new_import_rva));
+        doc["new_import_size"] = JsonValue(static_cast<std::uint64_t>(rep.new_import_size));
+        doc["new_section_name"] = JsonValue(rep.new_section_name);
+        doc["patched_binary_size"] = JsonValue(static_cast<std::uint64_t>(rep.patched_binary_size));
+    }
+
+    JsonValue ranges_arr = JsonValue::array();
+    for (const auto& rng : rep.discovered_ranges) {
+        JsonValue item = JsonValue::object();
+        item["start_va"] = JsonValue(rng.start_va);
+        item["end_va"] = JsonValue(rng.end_va);
+        item["size"] = JsonValue(static_cast<std::uint64_t>(rng.size));
+        item["section_name"] = JsonValue(rng.section_name);
+        item["candidate_pointers"] = JsonValue(static_cast<std::uint64_t>(rng.candidate_pointer_count));
+        item["resolved_apis"] = JsonValue(static_cast<std::uint64_t>(rng.resolved_api_count));
+        ranges_arr.push(std::move(item));
+    }
+    doc["discovered_ranges"] = std::move(ranges_arr);
+
+    JsonValue modules_arr = JsonValue::array();
+    for (const auto& mod : rep.modules) {
+        JsonValue m_obj = JsonValue::object();
+        m_obj["module_name"] = JsonValue(mod.module_name);
+        m_obj["first_thunk_rva"] = JsonValue(static_cast<std::uint64_t>(mod.first_thunk_rva));
+        m_obj["valid_functions"] = JsonValue(static_cast<std::uint64_t>(mod.valid_count()));
+
+        JsonValue fns_arr = JsonValue::array();
+        for (const auto& fn : mod.functions) {
+            JsonValue f_obj = JsonValue::object();
+            f_obj["name"] = JsonValue(fn.name);
+            f_obj["ordinal"] = JsonValue(static_cast<std::uint64_t>(fn.ordinal));
+            f_obj["iat_va"] = JsonValue(fn.iat_va);
+            f_obj["iat_rva"] = JsonValue(static_cast<std::uint64_t>(fn.iat_rva));
+            f_obj["target_va"] = JsonValue(fn.target_va);
+            f_obj["resolved_target_va"] = JsonValue(fn.resolved_target_va);
+            f_obj["resolution_type"] = JsonValue(std::string(pe::to_string(fn.resolution_type)));
+            f_obj["valid"] = JsonValue(fn.valid);
+            f_obj["comment"] = JsonValue(fn.comment);
+            fns_arr.push(std::move(f_obj));
+        }
+        m_obj["functions"] = std::move(fns_arr);
+        modules_arr.push(std::move(m_obj));
+    }
+    doc["modules"] = std::move(modules_arr);
+    return doc;
+}
+
+int command_fixiat(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("fixiat");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph fixiat: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    pe::IatReconstructionOptions opts;
+    opts.trace_redirections = !args.has("no-trace");
+    if (auto sec_opt = args.get("section")) {
+        opts.new_section_name = *sec_opt;
+    }
+
+    pe::IatReconstructor reconstructor(opts);
+    pe::IatReconstructionReport rep;
+
+    if (auto out_path = args.get("out")) {
+        auto rebuild_res = reconstructor.rebuild_pe(view.value(), &rep);
+        if (!rebuild_res) {
+            err << "typemorph fixiat: " << format_error(rebuild_res.error()) << '\n';
+            return 1;
+        }
+        auto wr = write_binary_file(*out_path, rebuild_res.value());
+        if (!wr) {
+            err << "typemorph fixiat: failed to write output file: " << *out_path << '\n';
+            return 1;
+        }
+        out << "Fixed PE with reconstructed import table written to: " << *out_path << "\n";
+    } else {
+        rep = reconstructor.analyze(view.value());
+    }
+
+    if (args.has("json")) {
+        auto doc = fixiat_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << pe::IatReconstructor::to_text_summary(rep);
+    return 0;
+}
+
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -3766,6 +3883,21 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         auto rep = img_res ? engine.detect(img_res.value()) : engine.detect_view(view_result.value());
         return detect_report_to_json(file.value(), rep);
     }
+    if (method == "fixiat" || method == "typemorph.fixiat" ||
+        method == "importfix" || method == "typemorph.importfix") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        pe::IatReconstructionOptions opts;
+        const auto* trace_val = params.find("trace_redirections");
+        if (trace_val && trace_val->as_bool()) {
+            opts.trace_redirections = *trace_val->as_bool();
+        }
+        pe::IatReconstructor reconstructor(opts);
+        auto rep = reconstructor.analyze(view_result.value());
+        return fixiat_report_to_json(file.value(), rep);
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -4085,6 +4217,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_detect(parsed.value(), out_, err_);
+    }
+    if (command == "fixiat" || command == "importfix") {
+        auto parsed = parse_arguments(
+            rest, {"out", "section"},
+            {"no-trace"}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_fixiat(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

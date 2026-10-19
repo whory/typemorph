@@ -33,6 +33,7 @@ Ghidra/IDA/editor integration.
   bitwise masking, tags monotonic sequences as timestamps/IDs, and infers **bitfield flag sets**
   via power-of-two and bit-gap analysis.
 - **Deep Compiler, Packer & Protection Identifier (`typemorph detect` / DIE Engine)** — deep identification of compilers (MSVC, GCC/MinGW, Clang, Delphi, FreePascal, Rust, Go), packers & protectors (UPX, ASPack, PECompact, VMProtect, Themida/WinLicense, Enigma, Armadillo, ConfuserEx, SmartAssembly, .NET Reactor, Spoon Studio), installers (Inno Setup, NSIS, PyInstaller), and runtime engines (AutoIt, .NET CLR) via entry point pattern matching and header metadata.
+- **PE IAT Reconstruction & Import Table Fixer (`typemorph fixiat`)** — deep import reconstruction inspired by Scylla and VMPImportFixer. Scans process dumps and memory sections for IAT pointer runs, traces obfuscated redirection thunks (`jmp [mem]`, `jmp imm`, `push imm; ret`, `mov reg, imm; jmp/ret`), matches known Windows API database exports (`KERNEL32`, `ntdll`, `USER32`, `ADVAPI32`, `WS2_32`), and rebuilds clean PE `IMAGE_IMPORT_DESCRIPTOR` / IAT / INT directory tables into an injected section (`.typem`).
 - **C / C++ Struct Memory Layout Inferrer & Structured Decompiler (`typemorph decompile`)** — infers struct fields, offsets, alignments, and padding from memory displacement operands (`[reg + disp]`, 8-bit/32-bit displacements, float/double SSE accesses) and decompiles basic blocks into structured C pseudocode (`if`, conditional branches, calls, arithmetic, returns).
 - **C# (.NET / CLR) Metadata Engine & Code Decompiler (`typemorph csharp`)** — pure C++20 PE COM descriptor and ECMA-335 CLI metadata parser. Decodes `BSJB` metadata root, `#Strings`, `#Blob`, and `#~` tables (`TypeDef`, `MethodDef`, `Field`, `TypeRef`), reconstructing formatted and compilable C# source code.
 - **Rust High-Level Source Code Reconstructor (`typemorph decompile --lang=rust`)** — synthesizes recovered trait-object vtables, niche-encoded enums, tagged unions, and demangled symbols into idiomatic, compilable Rust module source files (`.rs`).
@@ -174,6 +175,10 @@ typemorph rtti target.exe --format=cpp
 # Deep compiler, packer, and protection detection (DIE Engine)
 typemorph detect target.exe
 typemorph detect target.exe --json
+
+# Reconstruct PE Import Address Table (IAT) and rebuild fixed PE binary
+typemorph fixiat dump.exe
+typemorph fixiat dump.exe --out=fixed.exe --section=.typem
 
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe

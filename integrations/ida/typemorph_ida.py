@@ -427,8 +427,32 @@ class TypeMorphIdaSync:
             if ep:
                 ida_bytes.set_cmt(ep, info_cmt, False)
 
+    def sync_fixiat(self) -> None:
+        """Reconstruct PE IAT and label resolved API thunks."""
+        print(f"[TypeMorph IDA] Analyzing & fixing IAT: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "fixiat", self.target_path)
+        if not data:
+            return
+        modules = data.get("modules", [])
+        total_apis = data.get("resolved_functions", 0)
+        print(f"[TypeMorph IDA] Reconstructed {len(modules)} modules with {total_apis} resolved APIs")
+        if IN_IDA:
+            for mod in modules:
+                mod_name = mod.get("module_name", "")
+                for fn in mod.get("functions", []):
+                    iat_va = fn.get("iat_va", 0)
+                    fn_name = fn.get("name", "")
+                    if iat_va and fn_name:
+                        lbl = f"__imp_{fn_name}"
+                        ida_name.set_name(iat_va, lbl, ida_name.SN_NOWARN)
+                        cmt = f"Import: {mod_name}!{fn_name}"
+                        if fn.get("resolution_type") != "direct_va":
+                            cmt += f" ({fn.get('resolution_type')})"
+                        ida_bytes.set_cmt(iat_va, cmt, False)
+
     def run_all(self) -> None:
         self.sync_detect()
+        self.sync_fixiat()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()

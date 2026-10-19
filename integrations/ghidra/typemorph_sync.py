@@ -472,8 +472,32 @@ class GhidraSync:
                 addr = toAddr(ep)
                 setPlateComment(addr, f"[TypeMorph Detect]\nCompiler: {compiler}\nPacker: {packer}\nProtector: {protector}")
 
+    def sync_fixiat(self) -> None:
+        """Reconstruct PE IAT and annotate resolved import thunks in Ghidra."""
+        print(f"[TypeMorph Ghidra] Analyzing & fixing IAT: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "fixiat", self.target_path)
+        if not data:
+            return
+        modules = data.get("modules", [])
+        total_apis = data.get("resolved_functions", 0)
+        print(f"[TypeMorph Ghidra] Reconstructed {len(modules)} modules with {total_apis} resolved APIs")
+        if IN_GHIDRA:
+            for mod in modules:
+                mod_name = mod.get("module_name", "")
+                for fn in mod.get("functions", []):
+                    iat_va = fn.get("iat_va", 0)
+                    fn_name = fn.get("name", "")
+                    if iat_va and fn_name:
+                        addr = toAddr(iat_va)
+                        createLabel(addr, f"__imp_{fn_name}", True)
+                        cmt = f"Import: {mod_name}!{fn_name}"
+                        if fn.get("resolution_type") != "direct_va":
+                            cmt += f" ({fn.get('resolution_type')})"
+                        setPlateComment(addr, cmt)
+
     def run_all(self) -> None:
         self.sync_detect()
+        self.sync_fixiat()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
