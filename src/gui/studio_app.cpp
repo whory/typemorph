@@ -3,6 +3,10 @@
 
 #include "typemorph/gui/studio_app.hpp"
 #include "typemorph/core/executable.hpp"
+#include "typemorph/infer/diff_engine.hpp"
+#include "typemorph/emitter/cpp_emitter.hpp"
+#include "typemorph/emitter/rust_emitter.hpp"
+#include "typemorph/emitter/kaitai_emitter.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -16,6 +20,7 @@
 #include <commdlg.h>
 
 #include <algorithm>
+#include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
@@ -29,6 +34,7 @@ namespace {
 
 // Menu & Action IDs
 constexpr int IDM_FILE_OPEN          = 1001;
+constexpr int IDM_FILE_SAVE_AS       = 1000;
 constexpr int IDM_FILE_EXIT          = 1002;
 constexpr int IDM_ACTION_DEOBF       = 1003;
 constexpr int IDM_ACTION_DETECT      = 1004;
@@ -52,6 +58,9 @@ constexpr int IDM_ACTION_OPAQUE      = 1039;
 constexpr int IDM_ACTION_CFF         = 1040;
 constexpr int IDM_ACTION_CLASSINFO   = 1041;
 constexpr int IDM_ACTION_SIGMAKE     = 1042;
+constexpr int IDM_ACTION_INFER       = 1043;
+constexpr int IDM_ACTION_DUMPSUBS    = 1044;
+constexpr int IDM_ACTION_APPLYCALLEE = 1045;
 
 // Decompiler Modes
 constexpr int IDM_VIEW_CSHARP        = 1010;
@@ -448,6 +457,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         }
+        if (id == IDM_FILE_SAVE_AS) {
+            if (g_pApp) g_pApp->save_decompiled_output();
+            return 0;
+        }
         if (id == IDM_ACTION_DEOBF) {
             if (g_pApp) g_pApp->deobfuscate_current();
             return 0;
@@ -528,6 +541,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_pApp) g_pApp->run_sigmaker();
             return 0;
         }
+        if (id == IDM_ACTION_INFER) {
+            if (g_pApp) g_pApp->run_infer();
+            return 0;
+        }
+        if (id == IDM_ACTION_DUMPSUBS) {
+            if (g_pApp) g_pApp->run_dumpsubs();
+            return 0;
+        }
+        if (id == IDM_ACTION_APPLYCALLEE) {
+            if (g_pApp) g_pApp->run_applycalletype();
+            return 0;
+        }
 
         // View Mode Switches
         if (id == IDM_VIEW_CSHARP) { if (g_pApp) g_pApp->set_mode(DecompilerMode::csharp); return 0; }
@@ -565,7 +590,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 L"• ClassInformer C++ RTTI & Polymorphic Hierarchy\n"
                 L"• SigMaker (IDA / YARA / C Bytes Pattern Generator)\n"
                 L"• Cryptographic Constant Scanner & AES Key Recovery\n"
-                L"• Control Flow Flattening (CFF) Unflattener (OLLVM/Tigress)",
+                L"• Control Flow Flattening (CFF) Unflattener (OLLVM/Tigress)\n"
+                L"• Differential Binary Format & Schema Inference",
                 L"About TypeMorph Studio", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
@@ -608,9 +634,10 @@ void SetupMenus(HWND hwnd) {
 
     // File Menu
     HMENU hFile = CreatePopupMenu();
-    AppendMenuW(hFile, MF_STRING, IDM_FILE_OPEN, L"&Open Binary / Assembly...\tCtrl+O");
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_OPEN,    L"&Open Binary / Assembly...\tCtrl+O");
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_SAVE_AS, L"&Save Decompiled Code As...\tCtrl+S");
     AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(hFile, MF_STRING, IDM_FILE_EXIT, L"E&xit");
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_EXIT,    L"E&xit");
     AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hFile), L"&File");
 
     // Decompile Language Menu
@@ -632,6 +659,9 @@ void SetupMenus(HWND hwnd) {
     AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_CHECKSEC,    L"&Binary Hardening & Mitigations (checksec)");
     AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_RICH,        L"&MSVC Rich Header & Compiler Fingerprint");
     AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_ABI,         L"&Calling Convention & ABI Classifier");
+    AppendMenuW(hAnalysis, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_DUMPSUBS,    L"&Subroutines & Stack Purge Dumper (CSV / Table)");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_APPLYCALLEE, L"&Propagate Callee Types & Signatures (ApplyCalleeType)");
     AppendMenuW(hAnalysis, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_VMPROFILE,   L"&Virtual Machine Profiler (VMProtect / Themida)");
     AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_UNPACK,      L"&Universal PE Unpacker & Header Fix (UPX / ASPack)");
@@ -660,6 +690,7 @@ void SetupMenus(HWND hwnd) {
 
     // Tools & Signatures Menu
     HMENU hTools = CreatePopupMenu();
+    AppendMenuW(hTools, MF_STRING, IDM_ACTION_INFER,      L"&Infer Binary Format & Schema (Kaitai / C++ / Rust)");
     AppendMenuW(hTools, MF_STRING, IDM_ACTION_CLASSINFO,  L"&ClassInformer C++ RTTI Explorer");
     AppendMenuW(hTools, MF_STRING, IDM_ACTION_SIGMAKE,    L"&SigMaker (IDA / YARA / Byte Signature Generator)");
     AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hTools), L"&Tools");
@@ -1650,6 +1681,167 @@ void StudioApp::run_sigmaker() {
 
     SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
     LogMessage("[SigMaker] Generated " + std::to_string(sigs.size()) + " function signatures.");
+}
+
+void StudioApp::run_infer() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    infer::DiffOptions options;
+    options.confidence_threshold = 0.50;
+    infer::DiffEngine engine(options);
+    auto sample = infer::Sample{view.value(), current_file_, std::nullopt};
+    auto result = engine.infer(std::span<const infer::Sample>(&sample, 1));
+    if (!result) {
+        LogMessage("[Infer] Failed to infer structure: " + result.error().message);
+        return;
+    }
+
+    emit::EmitOptions emit_opt;
+    emit_opt.format_name = result.value().format_name.empty() ? "recovered" : result.value().format_name;
+    emit_opt.root_type_name = "RecoveredBinaryFile";
+    emit_opt.file_size = result.value().max_size;
+    emit_opt.endian = result.value().endian;
+    emit_opt.emit_comments = true;
+    emit_opt.emit_instances = true;
+
+    auto cpp_code = emit::CppEmitter{}.generate(*result.value().root, emit_opt);
+    auto rust_code = emit::RustEmitter{}.generate(*result.value().root, emit_opt);
+    auto kaitai_code = emit::KaitaiEmitter{}.generate(*result.value().root, emit_opt);
+
+    std::ostringstream out;
+    out << "// TypeMorph Differential Binary Format & Schema Inference\n"
+        << "// Target: " << current_file_ << "\n"
+        << "// Format: " << emit_opt.format_name << " (Confidence: "
+        << std::fixed << std::setprecision(2) << (result.value().confidence * 100.0) << "%)\n"
+        << "// Fields: " << result.value().fields.size() << " | Evidence count: " << result.value().evidence.size() << "\n\n"
+        << "================================================================================\n"
+        << "--- RECONSTRUCTED C++20 SCHEMA ---\n"
+        << "================================================================================\n"
+        << (cpp_code ? cpp_code.value() : "// C++ generation failed") << "\n\n"
+        << "================================================================================\n"
+        << "--- RECONSTRUCTED RUST STRUCT SCHEMA ---\n"
+        << "================================================================================\n"
+        << (rust_code ? rust_code.value() : "// Rust generation failed") << "\n\n"
+        << "================================================================================\n"
+        << "--- KAITAI STRUCT SPECIFICATION (.ksy) ---\n"
+        << "================================================================================\n"
+        << (kaitai_code ? kaitai_code.value() : "// Kaitai generation failed") << "\n";
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[Infer] Reconstructed format schema (" + std::to_string(result.value().fields.size()) + " fields, C++/Rust/Kaitai).");
+}
+
+void StudioApp::run_dumpsubs() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    auto img = core::ExecutableImage::parse(view.value());
+    if (!img) {
+        LogMessage("[DumpSubs] Requires valid executable binary.");
+        return;
+    }
+
+    abi::AbiClassifier classifier;
+    auto rep = classifier.analyze(img.value());
+
+    std::ostringstream out;
+    out << "Address,Name,Convention,ReturnType,StackFrame,StackPurge,Arguments,Prototype\n";
+    for (const auto& sig : rep.signatures) {
+        char va_buf[32];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llX", static_cast<unsigned long long>(sig.entry_va));
+        out << va_buf << ",\"" << sig.name << "\"," << to_string(sig.convention) << ",\""
+            << sig.return_type_hint << "\"," << sig.stack_frame_size << ","
+            << sig.stack_purge_bytes << "," << sig.arguments.size() << ",\""
+            << sig.prototype << "\"\n";
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[DumpSubs] Dumped " + std::to_string(rep.signatures.size()) + " subroutines to table.");
+}
+
+void StudioApp::run_applycalletype() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    auto img = core::ExecutableImage::parse(view.value());
+    if (!img) {
+        LogMessage("[ApplyCalleeType] Requires valid executable binary.");
+        return;
+    }
+
+    abi::AbiClassifier classifier;
+    auto rep = classifier.analyze(img.value());
+
+    std::ostringstream out;
+    out << "TypeMorph ApplyCalleeType - Call Site Type & Prototype Propagator\n"
+        << "================================================================\n"
+        << "Target: " << current_file_ << "\n"
+        << "Classified " << rep.signatures.size() << " callee signature(s) across "
+        << rep.total_functions << " analyzed functions:\n\n";
+
+    for (const auto& sig : rep.signatures) {
+        char va_buf[32];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llX", static_cast<unsigned long long>(sig.entry_va));
+        out << "  [" << va_buf << "] " << sig.prototype << "\n"
+            << "     Convention: " << to_string(sig.convention)
+            << " | Arguments: " << sig.arguments.size()
+            << " | Frame: " << sig.stack_frame_size << "B";
+        if (sig.stack_purge_bytes > 0) out << " | Purge: " << sig.stack_purge_bytes << "B";
+        out << "\n";
+        for (const auto& arg : sig.arguments) {
+            out << "       arg[" << arg.index << "] " << arg.location << " (" << arg.type_hint << ")\n";
+        }
+        out << "\n";
+    }
+    out << "(Status: Ready to propagate to IDA / Ghidra / Binary Ninja via typemorph_sync)\n";
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[ApplyCalleeType] Reconstructed " + std::to_string(rep.signatures.size()) + " callee prototypes.");
+}
+
+void StudioApp::save_decompiled_output() {
+    if (!g_hwndCode) return;
+    int len = GetWindowTextLengthW(g_hwndCode);
+    if (len <= 0) {
+        LogMessage("[Save] Nothing to save: code view is empty.");
+        return;
+    }
+
+    std::wstring buffer(static_cast<std::size_t>(len) + 1, 0);
+    GetWindowTextW(g_hwndCode, &buffer[0], len + 1);
+    buffer.resize(static_cast<std::size_t>(len));
+
+    wchar_t szSaveFile[MAX_PATH] = L"";
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hwndMain;
+    ofn.lpstrFilter = L"All Files (*.*)\0*.*\0C# Source (*.cs)\0*.cs\0C/C++ Source (*.cpp;*.c;*.h)\0*.cpp;*.c;*.h\0Rust Source (*.rs)\0*.rs\0Python / Script (*.py;*.au3;*.lua)\0*.py;*.au3;*.lua\0Text / Report (*.txt;*.csv)\0*.txt;*.csv\0";
+    ofn.lpstrFile = szSaveFile;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (GetSaveFileNameW(&ofn)) {
+        char path_mb[MAX_PATH];
+        WideCharToMultiByte(CP_UTF8, 0, szSaveFile, -1, path_mb, MAX_PATH, nullptr, nullptr);
+
+        int sz = WideCharToMultiByte(CP_UTF8, 0, buffer.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string content(static_cast<std::size_t>(sz), 0);
+        WideCharToMultiByte(CP_UTF8, 0, buffer.c_str(), -1, &content[0], sz, nullptr, nullptr);
+        if (!content.empty() && content.back() == '\0') content.pop_back();
+
+        std::ofstream fos(path_mb, std::ios::binary);
+        if (fos.is_open()) {
+            fos.write(content.data(), static_cast<std::streamsize>(content.size()));
+            fos.close();
+            LogMessage(std::string("[Save] Exported ") + std::to_string(content.size()) + " bytes to " + path_mb);
+        } else {
+            LogMessage(std::string("[Save Error] Failed to write file: ") + path_mb);
+        }
+    }
 }
 
 int StudioApp::run(const std::string& initial_file) {

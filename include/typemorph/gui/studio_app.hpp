@@ -97,6 +97,12 @@ public:
     void run_classinformer();
     void run_sigmaker();
 
+    // Binary Structure & Subroutine Inspection
+    void run_infer();
+    void run_dumpsubs();
+    void run_applycalletype();
+    void save_decompiled_output();
+
 private:
     std::string current_file_;
     DecompilerMode mode_ = DecompilerMode::csharp;
