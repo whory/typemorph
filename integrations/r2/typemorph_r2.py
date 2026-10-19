@@ -198,12 +198,44 @@ class R2Sync:
                     self.cmd(f"f cff.block.{idx}.st_{hex(st_id)}.{tag} = {va}")
                     self.cmd(f'CC "[TypeMorph CFF State {hex(st_id)} ({tag})]" @ {va}')
 
+    def sync_apihash(self) -> None:
+        print(f"[TypeMorph R2] Scanning for API hashes in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "apihash", self.target_path)
+        if not data:
+            return
+        matches = data.get("matches", [])
+        print(f"[TypeMorph R2] Found {len(matches)} API hash match(es)...")
+        for m in matches:
+            offset = m.get("offset", 0)
+            api = m.get("api", "")
+            mod = m.get("module", "")
+            algo = m.get("algorithm", "")
+            hash_val = m.get("hash", 0)
+            self.cmd(f"f apihash.{mod}.{api} = {offset}")
+            self.cmd(f'CC "[TypeMorph API Hash] 0x{hash_val:08X} -> {mod}!{api} ({algo})" @ {offset}')
+
+    def sync_opaque(self) -> None:
+        print(f"[TypeMorph R2] Scanning for opaque predicates in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "opaque", self.target_path)
+        if not data:
+            return
+        preds = data.get("predicates", [])
+        print(f"[TypeMorph R2] Found {len(preds)} opaque predicate(s)...")
+        for p in preds:
+            offset = p.get("offset", 0)
+            disasm = p.get("disassembly", "")
+            outcome = p.get("outcome", "")
+            tag = "ALWAYS TAKEN" if outcome == "always_true" else "DEAD (NEVER TAKEN)"
+            self.cmd(f'CC "[TypeMorph Opaque Predicate] {disasm} => {tag}" @ {offset}')
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
         self.sync_crypto()
         self.sync_cff()
+        self.sync_apihash()
+        self.sync_opaque()
         print("[TypeMorph R2] Synchronization complete!")
 
 

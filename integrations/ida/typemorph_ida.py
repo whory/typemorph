@@ -228,12 +228,50 @@ class TypeMorphIdaSync:
                         ida_name.set_name(ea, f"cff_st_0x{st_id:X}_{tag}", ida_name.SN_NOWARN)
                         ida_bytes.set_cmt(ea, f"[TypeMorph CFF State 0x{st_id:X} ({tag})]", False)
 
+    def sync_apihash(self) -> None:
+        """Detects API hashes and annotates resolved Windows/POSIX imports."""
+        print(f"[TypeMorph IDA] Scanning API hashes in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "apihash", self.target_path)
+        if not data:
+            return
+        matches = data.get("matches", [])
+        print(f"[TypeMorph IDA] Found {len(matches)} API hash match(es)")
+        if IN_IDA:
+            for m in matches:
+                offset = m.get("offset", 0)
+                api = m.get("api", "")
+                mod = m.get("module", "")
+                algo = m.get("algorithm", "")
+                hash_val = m.get("hash", 0)
+                ea = ida_nalt.get_imagebase() + offset
+                ida_bytes.set_cmt(ea, f"[TypeMorph API Hash] 0x{hash_val:08X} -> {mod}!{api} ({algo})", False)
+
+    def sync_opaque(self) -> None:
+        """Detects opaque predicates and dead branches in IDA."""
+        print(f"[TypeMorph IDA] Scanning opaque predicates in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "opaque", self.target_path)
+        if not data:
+            return
+        preds = data.get("predicates", [])
+        print(f"[TypeMorph IDA] Found {len(preds)} opaque predicate(s)")
+        if IN_IDA:
+            for p in preds:
+                offset = p.get("offset", 0)
+                disasm = p.get("disassembly", "")
+                outcome = p.get("outcome", "")
+                rationale = p.get("rationale", "")
+                ea = ida_nalt.get_imagebase() + offset
+                tag = "ALWAYS TAKEN" if outcome == "always_true" else "NEVER TAKEN (DEAD)"
+                ida_bytes.set_cmt(ea, f"[TypeMorph Opaque Predicate] {disasm} => {tag}\n{rationale}", True)
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
         self.sync_crypto()
         self.sync_cff()
+        self.sync_apihash()
+        self.sync_opaque()
         print("[TypeMorph IDA] Synchronization complete!")
 
 

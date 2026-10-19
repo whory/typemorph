@@ -232,12 +232,50 @@ class BinaryNinjaSync:
                         self.bv.define_auto_symbol(sym)
                         self.bv.set_comment_at(va, f"[TypeMorph CFF State 0x{st_id:X} ({tag})]")
 
+    def sync_apihash(self) -> None:
+        """Detects API hashes and annotates resolved Windows/POSIX imports."""
+        print(f"[TypeMorph Binja] Scanning API hashes in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "apihash", self.target_path)
+        if not data:
+            return
+        matches = data.get("matches", [])
+        print(f"[TypeMorph Binja] Found {len(matches)} API hash match(es)")
+        if self.bv:
+            for m in matches:
+                offset = m.get("offset", 0)
+                api = m.get("api", "")
+                mod = m.get("module", "")
+                algo = m.get("algorithm", "")
+                hash_val = m.get("hash", 0)
+                addr = self.bv.start + offset
+                self.bv.set_comment_at(addr, f"[TypeMorph API Hash] 0x{hash_val:08X} -> {mod}!{api} ({algo})")
+
+    def sync_opaque(self) -> None:
+        """Detects opaque predicates and dead branches in Binary Ninja."""
+        print(f"[TypeMorph Binja] Scanning opaque predicates in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "opaque", self.target_path)
+        if not data:
+            return
+        preds = data.get("predicates", [])
+        print(f"[TypeMorph Binja] Found {len(preds)} opaque predicate(s)")
+        if self.bv:
+            for p in preds:
+                offset = p.get("offset", 0)
+                disasm = p.get("disassembly", "")
+                outcome = p.get("outcome", "")
+                rationale = p.get("rationale", "")
+                addr = self.bv.start + offset
+                tag = "ALWAYS TAKEN" if outcome == "always_true" else "NEVER TAKEN (DEAD)"
+                self.bv.set_comment_at(addr, f"[TypeMorph Opaque Predicate] {disasm} => {tag}\n{rationale}")
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
         self.sync_crypto()
         self.sync_cff()
+        self.sync_apihash()
+        self.sync_opaque()
         print("[TypeMorph Binja] Synchronization complete!")
 
 
@@ -247,7 +285,7 @@ def binja_sync_all(bv):
 
 
 if IN_BINJA:
-    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt, Crypto, CFF)", "Run full TypeMorph analysis", binja_sync_all)
+    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt, Crypto, CFF, API Hash, Opaque)", "Run full TypeMorph analysis", binja_sync_all)
 
 
 def main():

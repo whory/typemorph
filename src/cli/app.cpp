@@ -6,8 +6,10 @@
 #include "typemorph/core/executable.hpp"
 #include "typemorph/core/result.hpp"
 #include "typemorph/crypto/crypto_scanner.hpp"
+#include "typemorph/deobf/api_hash_resolver.hpp"
 #include "typemorph/deobf/cff_reconstructor.hpp"
 #include "typemorph/deobf/devirtualizer.hpp"
+#include "typemorph/deobf/opaque_predicates.hpp"
 #include "typemorph/deobf/strings.hpp"
 #include "typemorph/deobf/unxorer.hpp"
 #include "typemorph/infer/bitfield_detector.hpp"
@@ -630,6 +632,14 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph cff <binary> [--function=VA] [--format=dot|mermaid|json] [--json]\n"
                "Reconstruct Control Flow Flattening (CFF) state transitions and unflatten CFG.\n";
     }
+    if (command == "apihash") {
+        return "Usage: typemorph apihash <binary|hash> [--json]\n"
+               "Resolves API hashes or scans binary for obfuscated API calls (ROR13, DJB2, SDBM, FNV-1a, CRC32).\n";
+    }
+    if (command == "opaque") {
+        return "Usage: typemorph opaque <binary> [--json]\n"
+               "Scans binary for x86/x64 invariant opaque predicates and dead branches.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -644,6 +654,8 @@ std::string command_help(std::string_view command) {
            "  strings <file>       String revealer (ASCII, UTF-16, stack, XOR, base64)\n"
            "  devirt <binary>      Devirtualizer (VM dispatchers & handlers)\n"
            "  cff <binary>         Control flow unflattening & CFG recovery\n"
+           "  apihash <file|hash>  Resolve API hashes & scan for hidden imports\n"
+           "  opaque <binary>      Detect invariant opaque predicates & dead code\n"
            "  entropy <file>       Shannon entropy graph & high-density zones\n"
            "  sig <binary>         Generate YARA rule from invariants & strings\n"
            "  crypto <file>        Detect cryptographic & hashing constants\n"
@@ -1876,6 +1888,170 @@ int command_cff(const Arguments& args, std::ostream& out, std::ostream& err) {
     return 0;
 }
 
+int command_apihash(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << "Usage: typemorph apihash <file|hash> [--json]\n\n"
+            << "Resolves API hashes or scans binary for obfuscated API calls.\n"
+            << "Supports ROR13, DJB2, SDBM, FNV-1a, and CRC32 across standard Windows and POSIX APIs.\n";
+        return 0;
+    }
+
+    const std::string& target = args.positional[0];
+    deobf::ApiHashResolver resolver;
+
+    bool is_number = false;
+    std::uint32_t hash_val = 0;
+    try {
+        if (target.size() > 2 && target[0] == '0' && (target[1] == 'x' || target[1] == 'X')) {
+            hash_val = static_cast<std::uint32_t>(std::stoul(target, nullptr, 16));
+            is_number = true;
+        } else if (!target.empty() && std::all_of(target.begin(), target.end(), [](unsigned char c) { return std::isdigit(c); })) {
+            hash_val = static_cast<std::uint32_t>(std::stoul(target, nullptr, 10));
+            is_number = true;
+        }
+    } catch (...) {
+        is_number = false;
+    }
+
+    if (is_number) {
+        auto matches = resolver.resolve(hash_val);
+        if (args.has("json")) {
+            JsonValue doc = JsonValue::object();
+            doc["hash"] = JsonValue(static_cast<std::uint64_t>(hash_val));
+            JsonValue array = JsonValue::array();
+            for (const auto& m : matches) {
+                JsonValue item = JsonValue::object();
+                item["api"] = JsonValue(m.api_name);
+                item["module"] = JsonValue(m.module_name);
+                item["algorithm"] = JsonValue(to_string(m.algorithm));
+                item["confidence"] = JsonValue(m.confidence);
+                array.push(std::move(item));
+            }
+            doc["matches"] = std::move(array);
+            out << doc.dump(2) << '\n';
+            return 0;
+        }
+
+        out << "Resolving API Hash 0x" << std::hex << std::uppercase << hash_val << std::dec << ":\n";
+        if (matches.empty()) {
+            out << "  No matches found in API database.\n";
+            return 0;
+        }
+        for (const auto& m : matches) {
+            out << "  -> " << m.module_name << "!" << m.api_name
+                << " (" << to_string(m.algorithm) << ", confidence "
+                << std::fixed << std::setprecision(1) << (m.confidence * 100.0) << "%)\n";
+        }
+        return 0;
+    }
+
+    auto view = BinaryView::open(target);
+    if (!view) {
+        err << "typemorph apihash: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto matches = resolver.scan(view.value());
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(target);
+        doc["count"] = JsonValue(static_cast<std::int64_t>(matches.size()));
+        JsonValue array = JsonValue::array();
+        for (const auto& m : matches) {
+            JsonValue item = JsonValue::object();
+            item["offset"] = JsonValue(static_cast<std::uint64_t>(m.offset));
+            item["hash"] = JsonValue(static_cast<std::uint64_t>(m.hash_value));
+            item["api"] = JsonValue(m.api_name);
+            item["module"] = JsonValue(m.module_name);
+            item["algorithm"] = JsonValue(to_string(m.algorithm));
+            item["confidence"] = JsonValue(m.confidence);
+            array.push(std::move(item));
+        }
+        doc["matches"] = std::move(array);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph API Hash Scanner\n"
+        << "  Target: " << target << "\n"
+        << "  Matches Detected: " << matches.size() << "\n\n";
+
+    if (matches.empty()) {
+        out << "  No known API hashes identified.\n";
+        return 0;
+    }
+
+    for (const auto& m : matches) {
+        char off_buf[32];
+        char hash_buf[32];
+        std::snprintf(off_buf, sizeof(off_buf), "0x%llx", static_cast<unsigned long long>(m.offset));
+        std::snprintf(hash_buf, sizeof(hash_buf), "0x%08X", m.hash_value);
+        out << "  [" << off_buf << "] " << hash_buf << " -> "
+            << m.module_name << "!" << m.api_name
+            << " (" << to_string(m.algorithm) << ")\n";
+    }
+    return 0;
+}
+
+int command_opaque(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << "Usage: typemorph opaque <file> [--json]\n\n"
+            << "Scans executable binary for x86/x64 invariant opaque predicates and dead code branches.\n";
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph opaque: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    deobf::OpaquePredicateDetector detector;
+    auto matches = detector.scan(view.value());
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(path);
+        doc["count"] = JsonValue(static_cast<std::int64_t>(matches.size()));
+        JsonValue array = JsonValue::array();
+        for (const auto& m : matches) {
+            JsonValue item = JsonValue::object();
+            item["offset"] = JsonValue(static_cast<std::uint64_t>(m.offset));
+            item["length"] = JsonValue(static_cast<std::uint64_t>(m.instruction_length));
+            item["outcome"] = JsonValue(to_string(m.outcome));
+            item["pattern"] = JsonValue(m.pattern_name);
+            item["disassembly"] = JsonValue(m.disassembly_hint);
+            item["rationale"] = JsonValue(m.rationale);
+            item["confidence"] = JsonValue(m.confidence);
+            array.push(std::move(item));
+        }
+        doc["predicates"] = std::move(array);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph Opaque Predicate & Dead Code Detector\n"
+        << "  Target: " << path << "\n"
+        << "  Opaque Invariants Detected: " << matches.size() << "\n\n";
+
+    if (matches.empty()) {
+        out << "  No invariant opaque predicates detected.\n";
+        return 0;
+    }
+
+    for (const auto& m : matches) {
+        char off_buf[32];
+        std::snprintf(off_buf, sizeof(off_buf), "0x%llx", static_cast<unsigned long long>(m.offset));
+        out << "  [" << off_buf << "] " << m.disassembly_hint
+            << " => " << (m.outcome == deobf::PredicateOutcome::always_true ? "ALWAYS TAKEN" : "NEVER TAKEN (DEAD)")
+            << " (" << m.pattern_name << ")\n"
+            << "     " << m.rationale << "\n";
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -1962,6 +2138,8 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("diff"));
         capabilities.push(JsonValue("cff"));
         capabilities.push(JsonValue("bitfield"));
+        capabilities.push(JsonValue("apihash"));
+        capabilities.push(JsonValue("opaque"));
         result["capabilities"] = std::move(capabilities);
         return result;
     }
@@ -2425,6 +2603,73 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         doc["functions"] = std::move(array);
         return doc;
     }
+    if (method == "apihash" || method == "typemorph.apihash") {
+        deobf::ApiHashResolver resolver;
+        const auto* hash_num = params.find("hash");
+        if (hash_num != nullptr && hash_num->as_int()) {
+            std::uint32_t val = static_cast<std::uint32_t>(*hash_num->as_int());
+            auto matches = resolver.resolve(val);
+            JsonValue doc = JsonValue::object();
+            doc["hash"] = JsonValue(static_cast<std::uint64_t>(val));
+            JsonValue array = JsonValue::array();
+            for (const auto& m : matches) {
+                JsonValue item = JsonValue::object();
+                item["api"] = JsonValue(m.api_name);
+                item["module"] = JsonValue(m.module_name);
+                item["algorithm"] = JsonValue(to_string(m.algorithm));
+                item["confidence"] = JsonValue(m.confidence);
+                array.push(std::move(item));
+            }
+            doc["matches"] = std::move(array);
+            return doc;
+        }
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto matches = resolver.scan(view_result.value());
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(file.value());
+        doc["count"] = JsonValue(static_cast<std::int64_t>(matches.size()));
+        JsonValue array = JsonValue::array();
+        for (const auto& m : matches) {
+            JsonValue item = JsonValue::object();
+            item["offset"] = JsonValue(static_cast<std::uint64_t>(m.offset));
+            item["hash"] = JsonValue(static_cast<std::uint64_t>(m.hash_value));
+            item["api"] = JsonValue(m.api_name);
+            item["module"] = JsonValue(m.module_name);
+            item["algorithm"] = JsonValue(to_string(m.algorithm));
+            item["confidence"] = JsonValue(m.confidence);
+            array.push(std::move(item));
+        }
+        doc["matches"] = std::move(array);
+        return doc;
+    }
+    if (method == "opaque" || method == "typemorph.opaque") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        deobf::OpaquePredicateDetector detector;
+        auto matches = detector.scan(view_result.value());
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(file.value());
+        doc["count"] = JsonValue(static_cast<std::int64_t>(matches.size()));
+        JsonValue array = JsonValue::array();
+        for (const auto& m : matches) {
+            JsonValue item = JsonValue::object();
+            item["offset"] = JsonValue(static_cast<std::uint64_t>(m.offset));
+            item["length"] = JsonValue(static_cast<std::uint64_t>(m.instruction_length));
+            item["outcome"] = JsonValue(to_string(m.outcome));
+            item["pattern"] = JsonValue(m.pattern_name);
+            item["disassembly"] = JsonValue(m.disassembly_hint);
+            item["rationale"] = JsonValue(m.rationale);
+            item["confidence"] = JsonValue(m.confidence);
+            array.push(std::move(item));
+        }
+        doc["predicates"] = std::move(array);
+        return doc;
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -2644,6 +2889,26 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_cff(parsed.value(), out_, err_);
+    }
+    if (command == "apihash") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_apihash(parsed.value(), out_, err_);
+    }
+    if (command == "opaque") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_opaque(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

@@ -36,6 +36,8 @@ Ghidra/IDA/editor integration.
   reconstructs `[drop_in_place, size, align, methods...]` trait vtables, and
   demangles both legacy `_ZN...E` and modern `_Rv0` symbols.
 - **Deobfuscation Engine** — includes:
+  * **API Hash Resolver**: resolves obfuscated Windows & POSIX API calls against precomputed hash tables (ROR13, DJB2, SDBM, FNV-1a, CRC32) or scans binaries for hidden import hashes (`typemorph apihash`).
+  * **Opaque Predicate & Dead Code Detector**: detects invariant conditions (self-xor, self-cmp, CLC/STC flags) and marks dead branches (`typemorph opaque`).
   * **Control Flow Flattening (CFF) Reconstructor**: detects dispatcher compare ladders, maps state variable IDs to basic blocks, tracks state transitions, and emits unflattened CFG graphs in Graphviz DOT, Mermaid, and JSON (`typemorph cff`).
   * **UnXORer**: automated single-byte, multi-byte, and rolling XOR cracking using IC and null-run heuristics.
   * **String Revealer**: extracts ASCII, UTF-16, x86/x64 stack strings (`mov [rbp-X], byte/imm32`), XOR payloads, Base64 strings, and ROT13 obfuscated commands.
@@ -49,7 +51,7 @@ Ghidra/IDA/editor integration.
   * **IDA Pro**: `integrations/ida/typemorph_ida.py` (IDAPython for IDA 7.x/8.x/9.x)
   * **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binja API v3/v4 plugin)
   * **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
-- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `entropy`, `sig`, `crypto`, `diff`,
+- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `apihash`, `opaque`, `entropy`, `sig`, `crypto`, `diff`,
   `serve`) and an ANSI terminal dashboard with hex/entropy heat map, collapsible AST, and live preview (`e` Kaitai, `K` C++, `R` Rust, `s`/`w` save).
 - **Zero required third-party dependencies** — the analysis core, executable
   parser, JSON-RPC, TUI, and test harness are self-contained, so air-gapped RE
@@ -137,6 +139,13 @@ typemorph devirt target.exe
 typemorph cff target.exe --format=dot --out=unflattened.dot
 typemorph cff target.exe --function=0x140001000 --format=mermaid
 
+# Resolve single API hash or scan binary for hidden import hashes
+typemorph apihash 0x0726774C
+typemorph apihash malware.bin
+
+# Detect invariant opaque predicates and dead branches
+typemorph opaque obfuscated.exe
+
 # Terminal ASCII Shannon entropy visualizer & packed section detector
 typemorph entropy sample.bin --block-size=64
 
@@ -182,7 +191,7 @@ python integrations/r2/typemorph_r2.py path/to/binary
 }}
 ```
 
-Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `cff`, `bitfield`, `entropy`, `sig`, `crypto`, `diff`
+Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `cff`, `bitfield`, `apihash`, `opaque`, `entropy`, `sig`, `crypto`, `diff`
 (also namespaced as `typemorph.*`). Notifications (requests without `id`) are
 executed without a reply, per JSON-RPC 2.0.
 

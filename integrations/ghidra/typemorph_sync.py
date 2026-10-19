@@ -260,12 +260,50 @@ class GhidraSync:
                         createLabel(blk_addr, f"cff_block_{idx}_st_0x{st_id:X}_{tag}", True)
                         setEOLComment(blk_addr, f"[TypeMorph CFF State 0x{st_id:X} ({tag})]")
 
+    def sync_apihash(self) -> None:
+        """Detects API hashes and annotates resolved Windows/POSIX imports."""
+        print(f"[TypeMorph Ghidra] Scanning API hashes in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "apihash", self.target_path)
+        if not data:
+            return
+        matches = data.get("matches", [])
+        print(f"[TypeMorph Ghidra] Found {len(matches)} API hash match(es)")
+        if IN_GHIDRA:
+            for m in matches:
+                off = m.get("offset", 0)
+                api = m.get("api", "")
+                mod = m.get("module", "")
+                algo = m.get("algorithm", "")
+                hash_val = m.get("hash", 0)
+                addr = currentProgram.getImageBase().add(off)
+                setEOLComment(addr, f"[TypeMorph API Hash] 0x{hash_val:08X} -> {mod}!{api} ({algo})")
+
+    def sync_opaque(self) -> None:
+        """Detects opaque predicates and dead branches in Ghidra."""
+        print(f"[TypeMorph Ghidra] Scanning opaque predicates in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "opaque", self.target_path)
+        if not data:
+            return
+        preds = data.get("predicates", [])
+        print(f"[TypeMorph Ghidra] Found {len(preds)} opaque predicate(s)")
+        if IN_GHIDRA:
+            for p in preds:
+                off = p.get("offset", 0)
+                disasm = p.get("disassembly", "")
+                outcome = p.get("outcome", "")
+                rationale = p.get("rationale", "")
+                addr = currentProgram.getImageBase().add(off)
+                tag = "ALWAYS TAKEN" if outcome == "always_true" else "NEVER TAKEN (DEAD)"
+                setPreComment(addr, f"[TypeMorph Opaque Predicate] {disasm} => {tag}\n{rationale}")
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
         self.sync_crypto()
         self.sync_cff()
+        self.sync_apihash()
+        self.sync_opaque()
         print("[TypeMorph Ghidra] Synchronization complete!")
 
 
