@@ -208,6 +208,21 @@ typemorph lua script.luac --out=decompiled.lua
 typemorph aes-recovery target.exe
 typemorph aes-recovery target.exe --json
 
+# Standalone Native Desktop GUI Studio (dnSpy / dotPeek architecture)
+typemorph studio Assembly.exe
+
+# Delphi / C++Builder VCL Form Rescuer & Event Mapper (IDR / DeDe engine)
+typemorph delphi project1.exe
+typemorph delphi project1.exe --pascal
+
+# Android Dalvik Executable (DEX) & Java Decompiler Engine (JADX style)
+typemorph dex classes.dex
+typemorph dex classes.dex --java
+
+# Visual Basic 5.0/6.0 Native & P-Code Analyzer & Decompiler (VB Decompiler)
+typemorph vb project1.exe
+typemorph vb project1.exe --source
+
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe
 
