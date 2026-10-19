@@ -25,6 +25,7 @@ public:
     JsonValue(std::nullptr_t) {}
     JsonValue(bool value) : storage_(value) {}
     JsonValue(int value) : storage_(static_cast<std::int64_t>(value)) {}
+    JsonValue(unsigned int value) : storage_(static_cast<std::int64_t>(value)) {}
     JsonValue(std::int64_t value) : storage_(value) {}
     JsonValue(std::uint64_t value);
     JsonValue(double value) : storage_(value) {}

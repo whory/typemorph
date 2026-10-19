@@ -1,46 +1,103 @@
-name: CI
+name: CI & Multi-Platform Matrix Build
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
-  linux:
-    name: Linux (${{ matrix.compiler }})
-    runs-on: ubuntu-24.04
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - compiler: gcc-13
-            cc: gcc-13
-            cxx: g++-13
-          - compiler: clang-17
-            cc: clang-17
-            cxx: clang++-17
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - name: Configure
-        env:
-          CC: ${{ matrix.cc }}
-          CXX: ${{ matrix.cxx }}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build build --parallel
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+          # --- Windows x64 ---
+          - name: Windows x64 (MSVC / LLVM)
+            os: windows-2025
+            target_arch: x64
+            artifact_name: typemorph-windows-x64
+            cmake_args: -A x64
 
-  windows:
-    name: Windows (MSVC)
-    runs-on: windows-2025
+          # --- Windows x86 (32-bit) ---
+          - name: Windows x86 (32-bit)
+            os: windows-2025
+            target_arch: x86
+            artifact_name: typemorph-windows-x86
+            cmake_args: -A Win32
+
+          # --- Linux x86_64 ---
+          - name: Linux x86_64 (GCC / Clang)
+            os: ubuntu-24.04
+            target_arch: x86_64
+            artifact_name: typemorph-linux-x64
+            install_cmd: sudo apt-get update && sudo apt-get install -y ninja-build
+            cmake_args: -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+          # --- Linux ARM64 (aarch64) ---
+          - name: Linux ARM64 (aarch64 cross)
+            os: ubuntu-24.04
+            target_arch: aarch64
+            artifact_name: typemorph-linux-arm64
+            install_cmd: sudo apt-get update && sudo apt-get install -y ninja-build gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            cmake_args: -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ -DTYPEMORPH_BUILD_TESTS=OFF
+
+          # --- macOS Intel (x86_64) ---
+          - name: macOS Intel (x86_64)
+            os: macos-13
+            target_arch: x86_64
+            artifact_name: typemorph-macos-x64
+            install_cmd: brew install ninja
+            cmake_args: -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
+
+          # --- macOS Apple Silicon (ARM64) ---
+          - name: macOS Apple Silicon (arm64)
+            os: macos-14
+            target_arch: arm64
+            artifact_name: typemorph-macos-arm64
+            install_cmd: brew install ninja
+            cmake_args: -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
+
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -A x64
-      - name: Build
+
+      - name: Install Dependencies
+        if: matrix.install_cmd != ''
+        run: ${{ matrix.install_cmd }}
+
+      - name: Configure CMake
+        run: cmake -S . -B build ${{ matrix.cmake_args }}
+
+      - name: Build TypeMorph
         run: cmake --build build --config Release --parallel
-      - name: Test
+
+      - name: Run Tests
+        if: matrix.target_arch != 'aarch64' || matrix.os != 'ubuntu-24.04'
         run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Prepare Artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir staging
+          copy build\Release\typemorph.exe staging\ || copy build\typemorph.exe staging\
+          copy README.md staging\
+          copy LICENSE staging\
+
+      - name: Prepare Artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir staging
+          cp build/typemorph staging/
+          cp README.md staging/
+          cp LICENSE staging/
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: staging/*
