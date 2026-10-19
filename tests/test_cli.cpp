@@ -389,6 +389,12 @@ TEST_CASE("cli: delphi displays help") {
     CHECK(help_res.out.find("Delphi / C++Builder") != std::string::npos);
 }
 
+TEST_CASE("cli: dex displays help") {
+    const auto help_res = invoke({"dex", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("Android Dalvik") != std::string::npos);
+}
+
 
 
 

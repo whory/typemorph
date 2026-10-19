@@ -38,6 +38,7 @@
 #include "typemorph/pe/iat_reconstructor.hpp"
 #include "typemorph/tui/dashboard.hpp"
 #include "typemorph/delphi/delphi_analyzer.hpp"
+#include "typemorph/dex/dex_analyzer.hpp"
 #ifdef _WIN32
 #include "typemorph/gui/studio_app.hpp"
 #endif
@@ -725,6 +726,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph delphi <binary> [--pascal] [--json]\n"
                "Delphi / C++Builder VCL & Form Rescuer: extracts DFM resources, maps GUI events to code addresses, and reconstructs Pascal units.\n";
     }
+    if (command == "dex" || command == "jadx" || command == "dalvik") {
+        return "Usage: typemorph dex <classes.dex> [--java] [--json]\n"
+               "Android Dalvik Executable (DEX) & Java Decompiler Engine (JADX style): decompiles Dalvik bytecode to Java classes.\n";
+    }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
                "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
@@ -743,6 +748,7 @@ std::string command_help(std::string_view command) {
            "  csharp <binary>      .NET / CLR assembly metadata extractor & C# code decompiler\n"
            "  dotnet-clean <bin>   Advanced .NET deobfuscator (inlines proxies, decrypts strings, kills switch)\n"
            "  delphi <binary>      Delphi / C++Builder VCL Form Rescuer & event handler mapper (IDR / DeDe)\n"
+           "  dex <classes.dex>    Android Dalvik DEX & Java decompiler engine (JADX style)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
@@ -3870,6 +3876,34 @@ int command_delphi(const Arguments& args, std::ostream& out, std::ostream& err) 
     return 0;
 }
 
+int command_dex(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("dex");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph dex: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto rep = dex::DexAnalyzer::analyze(view.value());
+    if (!rep.is_dex) {
+        err << "typemorph dex: " << path << " is not a valid Android Dalvik Executable (DEX).\n";
+        return 1;
+    }
+
+    if (args.has("java")) {
+        out << dex::DexAnalyzer::to_java_source(rep);
+        return 0;
+    }
+
+    out << dex::DexAnalyzer::format_report(rep);
+    return 0;
+}
+
 
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -5140,6 +5174,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_delphi(parsed.value(), out_, err_);
+    }
+    if (command == "dex" || command == "jadx" || command == "dalvik") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {"java"}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_dex(parsed.value(), out_, err_);
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {
