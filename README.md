@@ -199,6 +199,11 @@ typemorph dumpsubs target.exe --out=functions.csv --min-size=16
 typemorph dotnet-clean target.exe
 typemorph dotnet-clean target.exe --out=CleanSource.cs
 
+# Lua & LuaJIT Bytecode Decompiler & Disassembler (Lua 5.1-5.4, LuaJIT 2.0/2.1)
+typemorph lua script.luac
+typemorph lua script.luac --disasm
+typemorph lua script.luac --out=decompiled.lua
+
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe
 

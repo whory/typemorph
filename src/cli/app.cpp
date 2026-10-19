@@ -30,6 +30,7 @@
 #include "typemorph/security/security_analyzer.hpp"
 #include "typemorph/dotnet/dotnet_analyzer.hpp"
 #include "typemorph/dotnet/dotnet_deobf.hpp"
+#include "typemorph/lua/lua_decompiler.hpp"
 #include "typemorph/decompile/c_decompiler.hpp"
 #include "typemorph/derust/rust_source.hpp"
 #include "typemorph/detect/detect_engine.hpp"
@@ -707,6 +708,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph dotnet-clean <assembly.exe> [--out=clean.cs] [--json]\n"
                "Advanced .NET Deobfuscator: inlines ConfuserEx/.NET Reactor proxy calls, decrypts strings, and kills switch dispatchers.\n";
     }
+    if (command == "lua" || command == "luajit") {
+        return "Usage: typemorph lua <bytecode.luac> [--disasm] [--out=decompiled.lua] [--json]\n"
+               "Lua & LuaJIT Bytecode Decompiler: decompiles Lua 5.1/5.2/5.3/5.4 and LuaJIT 2.0/2.1 chunks.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -719,6 +724,7 @@ std::string command_help(std::string_view command) {
            "  decompile <binary>   Structured C / Rust decompiler & struct layout reconstructor\n"
            "  csharp <binary>      .NET / CLR assembly metadata extractor & C# code decompiler\n"
            "  dotnet-clean <bin>   Advanced .NET deobfuscator (inlines proxies, decrypts strings, kills switch)\n"
+           "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
            "  fixiat <dump.exe>    Reconstruct PE Import Address Table (IAT) & rebuild import directory\n"
            "  hybrid <binary>      Infer an embedded executable section\n"
@@ -3734,6 +3740,63 @@ int command_dotnet_clean(const Arguments& args, std::ostream& out, std::ostream&
     return 0;
 }
 
+JsonValue lua_report_to_json(const std::string& path, const lua::LuaDecompileReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["is_lua_bytecode"] = JsonValue(rep.is_lua_bytecode);
+    doc["flavor"] = JsonValue(std::string(lua::to_string(rep.flavor)));
+    doc["total_functions"] = JsonValue(static_cast<std::uint64_t>(rep.total_functions));
+    doc["total_instructions"] = JsonValue(static_cast<std::uint64_t>(rep.total_instructions));
+    doc["total_constants"] = JsonValue(static_cast<std::uint64_t>(rep.total_constants));
+    doc["source"] = JsonValue(rep.lua_source);
+    return doc;
+}
+
+int command_lua(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("lua");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph lua: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    lua::LuaDecompiler decompiler;
+    lua::LuaDecompileReport rep = decompiler.decompile(view.value());
+
+    if (!rep.is_lua_bytecode) {
+        err << "typemorph lua: file is not a valid Lua or LuaJIT bytecode file\n";
+        return 1;
+    }
+
+    if (args.has("json")) {
+        auto doc = lua_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    std::string text_output = args.has("disasm") ? lua::LuaDecompiler::to_disassembly(rep)
+                                                 : rep.lua_source;
+
+    if (auto out_path = args.get("out")) {
+        auto wr = write_file(*out_path, text_output);
+        if (!wr) {
+            err << "typemorph lua: failed to write: " << *out_path << '\n';
+            return 1;
+        }
+        out << "Lua " << (args.has("disasm") ? "disassembly" : "decompilation")
+            << " written to: " << *out_path << "\n";
+        return 0;
+    }
+
+    out << text_output;
+    return 0;
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -3832,6 +3895,7 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("csharp"));
         capabilities.push(JsonValue("dotnet"));
         capabilities.push(JsonValue("dotnet-clean"));
+        capabilities.push(JsonValue("lua"));
         capabilities.push(JsonValue("decompile"));
         result["capabilities"] = std::move(capabilities);
         return result;
@@ -4447,6 +4511,16 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         auto rep = deobfuscator.deobfuscate(img_res.value());
         return dotnet_deobf_report_to_json(file.value(), rep);
     }
+    if (method == "lua" || method == "typemorph.lua" ||
+        method == "luajit" || method == "typemorph.luajit") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        lua::LuaDecompiler decompiler;
+        auto rep = decompiler.decompile(view_result.value());
+        return lua_report_to_json(file.value(), rep);
+    }
     if (method == "decompile" || method == "typemorph.decompile") {
         auto file = json_string_field(params, "file");
         if (!file) return file.error();
@@ -4952,6 +5026,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_dotnet_clean(parsed.value(), out_, err_);
+    }
+    if (command == "lua" || command == "luajit") {
+        auto parsed = parse_arguments(
+            rest, {"out"},
+            {"disasm"}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_lua(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

@@ -357,6 +357,16 @@ TEST_CASE("cli: dotnet-clean handles non-dotnet or dotnet binaries") {
     CHECK(help_res.out.find("dotnet-clean") != std::string::npos);
 }
 
+TEST_CASE("cli: lua decompiles or displays help") {
+    const auto help_res = invoke({"lua", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("Lua & LuaJIT") != std::string::npos);
+
+    const auto res = invoke({"lua", fixture_path("rust_sample.elf")});
+    CHECK_EQ(res.exit_code, 1);
+    CHECK(res.err.find("not a valid Lua") != std::string::npos);
+}
+
 
 
 
