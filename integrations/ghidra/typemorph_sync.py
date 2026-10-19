@@ -423,6 +423,39 @@ class GhidraSync:
                     else:
                         setPreComment(addr, f"[TypeMorph ABI] {proto} ({conv})")
 
+    def sync_decompile(self) -> None:
+        """Decompiles functions and infers struct layouts in Ghidra."""
+        print(f"[TypeMorph Ghidra] Decompiling functions & inferring structs in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "decompile", self.target_path)
+        if not data:
+            return
+        structs = data.get("structs", [])
+        fns = data.get("functions", [])
+        print(f"[TypeMorph Ghidra] Decompiled {len(fns)} function(s), inferred {len(structs)} struct layout(s)")
+        if IN_GHIDRA:
+            for fn in fns:
+                va = fn.get("entry_va", 0)
+                pseudo = fn.get("pseudocode", "")
+                if va and pseudo:
+                    addr = toAddr(va)
+                    setPlateComment(addr, f"[TypeMorph Decompile]\n{pseudo[:500]}...")
+
+    def sync_csharp(self) -> None:
+        """Extracts ECMA-335 CLI metadata and decompiles C# types in Ghidra."""
+        print(f"[TypeMorph Ghidra] Extracting .NET / C# metadata in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "csharp", self.target_path)
+        if not data or not data.get("is_dotnet"):
+            return
+        types = data.get("types", [])
+        print(f"[TypeMorph Ghidra] Recovered {len(types)} .NET type(s) ({data.get('runtime_version')})")
+        if IN_GHIDRA:
+            for t in types:
+                for m in t.get("methods", []):
+                    rva = m.get("rva", 0)
+                    if rva:
+                        addr = toAddr(currentProgram.getImageBase().getOffset() + rva)
+                        createLabel(addr, f"dotnet__{t.get('name')}__{m.get('name')}", True)
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -436,6 +469,8 @@ class GhidraSync:
         self.sync_go()
         self.sync_rich()
         self.sync_abi()
+        self.sync_decompile()
+        self.sync_csharp()
         print("[TypeMorph Ghidra] Synchronization complete!")
 
 

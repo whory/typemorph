@@ -383,6 +383,39 @@ class BinaryNinjaSync:
                 if va:
                     self.bv.set_comment_at(va, f"[TypeMorph ABI] {proto}\nConvention: {conv} ({rat})")
 
+    def sync_decompile(self) -> None:
+        """Decompiles functions and infers struct layouts in Binary Ninja."""
+        print(f"[TypeMorph Binja] Decompiling functions & inferring structs in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "decompile", self.target_path)
+        if not data:
+            return
+        structs = data.get("structs", [])
+        fns = data.get("functions", [])
+        print(f"[TypeMorph Binja] Decompiled {len(fns)} function(s), inferred {len(structs)} struct layout(s)")
+        if self.bv:
+            for fn in fns:
+                va = fn.get("entry_va", 0)
+                pseudo = fn.get("pseudocode", "")
+                if va and pseudo:
+                    self.bv.set_comment_at(va, f"[TypeMorph Decompile]\n{pseudo[:500]}...")
+
+    def sync_csharp(self) -> None:
+        """Extracts ECMA-335 CLI metadata and decompiles C# types in Binary Ninja."""
+        print(f"[TypeMorph Binja] Extracting .NET / C# metadata in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "csharp", self.target_path)
+        if not data or not data.get("is_dotnet"):
+            return
+        types = data.get("types", [])
+        print(f"[TypeMorph Binja] Recovered {len(types)} .NET type(s) ({data.get('runtime_version')})")
+        if self.bv:
+            for t in types:
+                for m in t.get("methods", []):
+                    rva = m.get("rva", 0)
+                    if rva:
+                        addr = self.bv.start + rva
+                        sym = Symbol(SymbolType.FunctionSymbol, addr, f"dotnet__{t.get('name')}__{m.get('name')}")
+                        self.bv.define_auto_symbol(sym)
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -396,6 +429,8 @@ class BinaryNinjaSync:
         self.sync_go()
         self.sync_rich()
         self.sync_abi()
+        self.sync_decompile()
+        self.sync_csharp()
         print("[TypeMorph Binja] Synchronization complete!")
 
 
@@ -405,7 +440,7 @@ def binja_sync_all(bv):
 
 
 if IN_BINJA:
-    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt, Crypto, CFF, API Hash, Opaque, RTTI, Checksec, Go, Rich, ABI)", "Run full TypeMorph analysis", binja_sync_all)
+    PluginCommand.register("TypeMorph\\Sync All", "Run full TypeMorph analysis", binja_sync_all)
 
 
 def main():

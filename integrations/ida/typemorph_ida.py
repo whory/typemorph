@@ -379,6 +379,38 @@ class TypeMorphIdaSync:
                     except Exception:
                         pass
 
+    def sync_decompile(self) -> None:
+        """Decompiles functions and infers struct layouts from machine displacements."""
+        print(f"[TypeMorph IDA] Decompiling functions & inferring structs in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "decompile", self.target_path)
+        if not data:
+            return
+        structs = data.get("structs", [])
+        fns = data.get("functions", [])
+        print(f"[TypeMorph IDA] Decompiled {len(fns)} function(s), inferred {len(structs)} struct layout(s)")
+        if IN_IDA:
+            for fn in fns:
+                va = fn.get("entry_va", 0)
+                pseudo = fn.get("pseudocode", "")
+                if va and pseudo:
+                    ida_bytes.set_cmt(va, f"[TypeMorph Decompile]\n{pseudo[:500]}...", True)
+
+    def sync_csharp(self) -> None:
+        """Extracts ECMA-335 CLI metadata and decompiles C# types."""
+        print(f"[TypeMorph IDA] Extracting .NET / C# metadata in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "csharp", self.target_path)
+        if not data or not data.get("is_dotnet"):
+            return
+        types = data.get("types", [])
+        print(f"[TypeMorph IDA] Recovered {len(types)} .NET type(s) ({data.get('runtime_version')})")
+        if IN_IDA:
+            for t in types:
+                for m in t.get("methods", []):
+                    rva = m.get("rva", 0)
+                    if rva:
+                        ea = ida_nalt.get_imagebase() + rva
+                        ida_name.set_name(ea, f"dotnet__{t.get('name')}__{m.get('name')}", ida_name.SN_NOWARN)
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -392,6 +424,8 @@ class TypeMorphIdaSync:
         self.sync_go()
         self.sync_rich()
         self.sync_abi()
+        self.sync_decompile()
+        self.sync_csharp()
         print("[TypeMorph IDA] Synchronization complete!")
 
 

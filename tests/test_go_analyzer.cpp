@@ -92,3 +92,154 @@ TEST_CASE("go: synthetic pclntab recovery (Go 1.2 - 1.15 format)") {
     CHECK_EQ(rep.user_functions, std::size_t{2});
     CHECK_EQ(rep.runtime_functions, std::size_t{0});
 }
+
+TEST_CASE("go: to_golang_source generates valid Go source code") {
+    GoAnalysisReport report;
+    report.detected = true;
+    report.version = GoPclnVersion::go118;
+    report.ptr_size = 8;
+    report.function_count = 1;
+
+    // Interface
+    GoInterfaceType iface;
+    iface.name = "Greeter";
+    iface.type_va = 0x480000;
+    iface.methods.push_back({"Greet", "func()", 0x401020});
+    report.interfaces.push_back(iface);
+
+    // Struct
+    GoStructType st;
+    st.name = "UserSession";
+    st.size = 24;
+    st.type_va = 0x481000;
+    st.fields.push_back({"Token", "string", "json:\"token\"", 0x0});
+    st.fields.push_back({"Expires", "int64", "", 0x10});
+    report.structs.push_back(st);
+
+    // itab
+    GoITab itab;
+    itab.itab_va = 0x490000;
+    itab.interface_name = "Greeter";
+    itab.concrete_type_name = "UserSession";
+    itab.methods.push_back({"Greet", "func()", 0x401020});
+    report.itabs.push_back(itab);
+
+    // User function
+    GoFunction fn;
+    fn.name = "main.runServer";
+    fn.package_name = "main";
+    fn.entry_va = 0x401000;
+    fn.frame_size = 32;
+    fn.args_size = 8;
+    report.functions.push_back(fn);
+
+    std::string go_code = GoAnalyzer::to_golang_source(report);
+
+    CHECK(go_code.find("package main") != std::string::npos);
+    CHECK(go_code.find("type Greeter interface {") != std::string::npos);
+    CHECK(go_code.find("Greet()") != std::string::npos);
+    CHECK(go_code.find("type UserSession struct {") != std::string::npos);
+    CHECK(go_code.find("Token string `json:\"token\"` // +0x0") != std::string::npos);
+    CHECK(go_code.find("Expires int64 // +0x10") != std::string::npos);
+    CHECK(go_code.find("func (recv *UserSession) Greet()") != std::string::npos);
+    CHECK(go_code.find("func main.runServer()") != std::string::npos);
+}
+
+TEST_CASE("go: synthetic runtime type descriptors and itab recovery") {
+    // Construct synthetic 64-bit ELF image with .rodata and .data containing Go itab & struct
+    std::vector<std::uint8_t> buffer(4096, 0x00);
+
+    // Section 1: .text (executable, VA 0x401000, file offset 0x100, size 0x100)
+    // Section 2: .rodata (read-only, VA 0x402000, file offset 0x200, size 0x400)
+    // Section 3: .data (read-write, VA 0x403000, file offset 0x600, size 0x400)
+
+    // In .rodata (file offset 0x200, VA 0x402000):
+    // Type name strings at types_base = 0x200:
+    // Offset 0x10 (0x210): tag=0x00, len=7, "Greeter"
+    buffer[0x210] = 0x00;
+    buffer[0x211] = 7;
+    std::memcpy(&buffer[0x212], "Greeter", 7);
+
+    // Offset 0x20 (0x220): tag=0x00, len=11, "UserSession"
+    buffer[0x220] = 0x00;
+    buffer[0x221] = 11;
+    std::memcpy(&buffer[0x222], "UserSession", 11);
+
+    // Offset 0x30 (0x230): tag=0x00, len=5, "Token"
+    buffer[0x230] = 0x00;
+    buffer[0x231] = 5;
+    std::memcpy(&buffer[0x232], "Token", 5);
+
+    // Interface _type at 0x250 (VA 0x402050):
+    // kind at 0x250 + 23 = 20 (kKindInterface)
+    buffer[0x250 + 23] = 20;
+    // str offset at 0x250 + 40 = 0x10 ("Greeter")
+    *reinterpret_cast<std::int32_t*>(&buffer[0x250 + 40]) = 0x10;
+
+    // Struct _type at 0x280 (VA 0x402080):
+    // size at 0x280 = 16
+    *reinterpret_cast<std::uint64_t*>(&buffer[0x280]) = 16;
+    // align at 0x280 + 21 = 8
+    buffer[0x280 + 21] = 8;
+    // kind at 0x280 + 23 = 25 (kKindStruct)
+    buffer[0x280 + 23] = 25;
+    // str offset at 0x280 + 40 = 0x20 ("UserSession")
+    *reinterpret_cast<std::int32_t*>(&buffer[0x280 + 40]) = 0x20;
+    // fields slice at 0x280 + 56 (VA 0x4020B8):
+    // ptr to fields = 0x4020E0 (file offset 0x2E0)
+    *reinterpret_cast<std::uint64_t*>(&buffer[0x280 + 56]) = 0x4020E0;
+    // len = 1
+    *reinterpret_cast<std::uint64_t*>(&buffer[0x280 + 64]) = 1;
+    // cap = 1
+    *reinterpret_cast<std::uint64_t*>(&buffer[0x280 + 72]) = 1;
+
+    // Field 0 at 0x2E0 (VA 0x4020E0, 24 bytes):
+    // name offset = 0x30 ("Token")
+    *reinterpret_cast<std::int32_t*>(&buffer[0x2E0]) = 0x30;
+    // offset in struct at 0x2E0 + 16 = 0
+    *reinterpret_cast<std::uint64_t*>(&buffer[0x2E0 + 16]) = 0;
+
+    // In .data (file offset 0x600, VA 0x403000):
+    // itab at 0x600 (VA 0x403000):
+    // inter = 0x402050
+    *reinterpret_cast<std::uint64_t*>(&buffer[0x600]) = 0x402050;
+    // _type = 0x402080
+    *reinterpret_cast<std::uint64_t*>(&buffer[0x608]) = 0x402080;
+    // hash = 0x12345678
+    *reinterpret_cast<std::uint32_t*>(&buffer[0x610]) = 0x12345678;
+    // fun[0] = 0x401050 (points into executable .text section)
+    *reinterpret_cast<std::uint64_t*>(&buffer[0x618]) = 0x401050;
+
+    ImageParts parts;
+    parts.format = ImageFormat::elf;
+    parts.bits = 64;
+    parts.endian = ByteOrder::little;
+    parts.image_base = 0x400000;
+    parts.entry_point = 0x401000;
+    parts.sections.push_back({".text", 0x401000, 0x100, 0x100, 0x100, SectionFlag::executable});
+    parts.sections.push_back({".rodata", 0x402000, 0x400, 0x200, 0x400, SectionFlag::read_only});
+    parts.sections.push_back({".data", 0x403000, 0x400, 0x600, 0x400, SectionFlag::writable});
+
+    auto view = BinaryView::from_external(buffer, "synthetic.go.bin");
+    auto image = ExecutableImage::from_parts(view, std::move(parts));
+
+    GoAnalyzer analyzer;
+    GoAnalysisReport report;
+    report.detected = true;
+    report.ptr_size = 8;
+    analyzer.recover_types(image, report);
+
+    REQUIRE_EQ(report.itabs.size(), std::size_t{1});
+    CHECK_EQ(report.itabs[0].interface_name, std::string("Greeter"));
+    CHECK_EQ(report.itabs[0].concrete_type_name, std::string("UserSession"));
+    REQUIRE_EQ(report.itabs[0].methods.size(), std::size_t{1});
+    CHECK_EQ(report.itabs[0].methods[0].fn_va, std::uint64_t{0x401050});
+
+    REQUIRE_EQ(report.structs.size(), std::size_t{1});
+    CHECK_EQ(report.structs[0].name, std::string("UserSession"));
+    CHECK_EQ(report.structs[0].size, std::uint64_t{16});
+    REQUIRE_EQ(report.structs[0].fields.size(), std::size_t{1});
+    CHECK_EQ(report.structs[0].fields[0].name, std::string("Token"));
+    CHECK_EQ(report.structs[0].fields[0].offset, std::uint64_t{0});
+}
+

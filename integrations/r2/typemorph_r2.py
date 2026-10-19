@@ -322,6 +322,34 @@ class R2Sync:
                 safe_proto = proto.replace('"', '\\"')
                 self.cmd(f'CC "[TypeMorph ABI] {safe_proto} ({conv})" @ {va}')
 
+    def sync_decompile(self) -> None:
+        print(f"[TypeMorph R2] Decompiling functions & inferring structs in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "decompile", self.target_path)
+        if not data:
+            return
+        fns = data.get("functions", [])
+        structs = data.get("structs", [])
+        print(f"[TypeMorph R2] Decompiled {len(fns)} function(s), {len(structs)} struct layout(s)...")
+        for fn in fns:
+            va = fn.get("entry_va", 0)
+            pseudo = fn.get("pseudocode", "")
+            if va and pseudo:
+                first_line = pseudo.split("\n")[0].replace('"', '\\"')
+                self.cmd(f'CC "[TypeMorph Decompile] {first_line}" @ {va}')
+
+    def sync_csharp(self) -> None:
+        print(f"[TypeMorph R2] Extracting .NET metadata in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "csharp", self.target_path)
+        if not data or not data.get("is_dotnet"):
+            return
+        types = data.get("types", [])
+        print(f"[TypeMorph R2] Recovered {len(types)} .NET type(s)...")
+        for t in types:
+            for m in t.get("methods", []):
+                rva = m.get("rva", 0)
+                if rva:
+                    self.cmd(f"f dotnet.{t.get('name')}.{m.get('name')} = {rva}")
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -335,6 +363,8 @@ class R2Sync:
         self.sync_go()
         self.sync_rich()
         self.sync_abi()
+        self.sync_decompile()
+        self.sync_csharp()
         print("[TypeMorph R2] Synchronization complete!")
 
 

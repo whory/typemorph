@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
     TypeMorph
-    VERSION 0.6.0
-    DESCRIPTION "Binary structure inference and Rust semantic recovery framework"
+    VERSION 0.7.0
+    DESCRIPTION "Binary structure inference, code reconstruction & semantic recovery framework"
     HOMEPAGE_URL "https://github.com/typemorph/typemorph"
     LANGUAGES CXX
 )
@@ -35,6 +35,8 @@ file(GLOB_RECURSE TYPEMORPH_RTTI_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR
 file(GLOB_RECURSE TYPEMORPH_GO_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/go/*.cpp")
 file(GLOB_RECURSE TYPEMORPH_PE_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/pe/*.cpp")
 file(GLOB_RECURSE TYPEMORPH_ABI_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/abi/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_DOTNET_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/dotnet/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_DECOMPILE_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/decompile/*.cpp")
 
 add_library(
     typemorph_core STATIC
@@ -52,6 +54,8 @@ add_library(
     ${TYPEMORPH_GO_SOURCES}
     ${TYPEMORPH_PE_SOURCES}
     ${TYPEMORPH_ABI_SOURCES}
+    ${TYPEMORPH_DOTNET_SOURCES}
+    ${TYPEMORPH_DECOMPILE_SOURCES}
 )
 
 add_library(TypeMorph::Core ALIAS typemorph_core)

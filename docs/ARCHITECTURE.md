@@ -137,6 +137,22 @@ Confidence is a product of independent evidence; the CLI's
    - Disassembles function prologues and epilogues across x86 and x64 architectures.
    - Analyzes register read-before-write access and stack purge bytes (`ret N` vs `ret`) to classify calling conventions (`__cdecl`, `__stdcall`, `__fastcall`, `__thiscall`, `__win64`, `__sysv`).
    - Detects stack frame allocations and return kinds (integer, pointer, boolean, float, double), synthesizing complete C/C++ prototypes (`typemorph abi`).
+16. **C / C++ Struct Memory Layout Inferrer & Structured Decompiler (`typemorph::decompile::CDecompiler`)**:
+   - Disassembles function basic blocks and traces base register memory access operands (`[reg + disp]`, 8-bit/32-bit displacements, float/double SSE accesses).
+   - Recovers struct field offsets, sizes, alignments, and padding to emit valid C `typedef struct { ... }`.
+   - Synthesizes structured C pseudocode (`if`, conditional jumps, calls, arithmetic, returns) (`typemorph decompile`).
+17. **C# (.NET / CLR) Metadata Engine & Code Decompiler (`typemorph::dotnet::DotNetAnalyzer`)**:
+   - Locates CLI header (`IMAGE_COR20_HEADER`) via PE COM descriptor directory.
+   - Decodes `BSJB` metadata root and stream headers (`#~`, `#Strings`, `#Blob`).
+   - Parses ECMA-335 metadata tables (`TypeDef`, `MethodDef`, `Field`, `TypeRef`) with 1-based index mapping.
+   - Emits clean, compilable C# source code files with namespaces, classes, interfaces, enums, structs, fields, and method stubs (`typemorph csharp`).
+18. **Rust High-Level Source Code Reconstructor (`typemorph::derust::RustSourceReconstructor`)**:
+   - Synthesizes recovered trait-object vtables, niche-encoded enums, tagged unions, and demangled symbols.
+   - Emits idiomatic, compilable Rust source code files (`.rs`) (`typemorph decompile --lang=rust`).
+19. **Golang Runtime Type Descriptor & Interface Table Reconstructor (`typemorph::golang::GoAnalyzer`)**:
+   - Recovers Go struct types, field offsets, types, and tags from runtime memory descriptors.
+   - Recovers interface tables (`itabs`) mapping interface methods to concrete function pointers.
+   - Emits complete, compilable Go source code with interfaces, structs, method sets, and implementations (`typemorph go --source`).
 
 ## Emitters
 

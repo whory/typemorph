@@ -28,6 +28,9 @@
 #include "typemorph/abi/calling_convention.hpp"
 #include "typemorph/rtti/rtti_analyzer.hpp"
 #include "typemorph/security/security_analyzer.hpp"
+#include "typemorph/dotnet/dotnet_analyzer.hpp"
+#include "typemorph/decompile/c_decompiler.hpp"
+#include "typemorph/derust/rust_source.hpp"
 #include "typemorph/tui/dashboard.hpp"
 
 #include <algorithm>
@@ -650,8 +653,8 @@ std::string command_help(std::string_view command) {
                "Reconstruct C++ polymorphic class names, inheritance hierarchy, and vftables from RTTI.\n";
     }
     if (command == "go") {
-        return "Usage: typemorph go <binary> [--json]\n"
-               "Reconstruct Golang functions, packages, and pclntab symbol metadata from stripped binaries.\n";
+        return "Usage: typemorph go <binary> [--source] [--out=FILE] [--json]\n"
+               "Reconstruct Golang functions, packages, structs, interfaces, itabs, and Go source code from stripped binaries.\n";
     }
     if (command == "rich") {
         return "Usage: typemorph rich <binary> [--json]\n"
@@ -665,6 +668,14 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph abi <binary> [--function=VA] [--json]\n"
                "Classify calling conventions (__cdecl, __stdcall, __fastcall, __thiscall, __win64, __sysv), argument registers, and recover C prototypes.\n";
     }
+    if (command == "csharp" || command == "dotnet") {
+        return "Usage: typemorph csharp <binary> [--out=FILE] [--json]\n"
+               "Extract ECMA-335 CLI metadata, TypeDef, MethodDef, Field tables and decompile C# source code.\n";
+    }
+    if (command == "decompile") {
+        return "Usage: typemorph decompile <binary> [--function=VA] [--lang=c|rust] [--out=FILE] [--json]\n"
+               "Decompile machine code into structured C pseudocode, infer struct layouts, or reconstruct Rust code.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -674,6 +685,8 @@ std::string command_help(std::string_view command) {
            "  inspect <file>       Interactive TUI dashboard\n"
            "  infer <samples...>   Differential format inference\n"
            "  rust <binary>        Rust semantic recovery\n"
+           "  decompile <binary>   Structured C / Rust decompiler & struct layout reconstructor\n"
+           "  csharp <binary>      .NET / CLR assembly metadata extractor & C# code decompiler\n"
            "  hybrid <binary>      Infer an embedded executable section\n"
            "  unxor <file>         XOR key discovery and deobfuscation\n"
            "  strings <file>       String revealer (ASCII, UTF-16, stack, XOR, base64)\n"
@@ -2365,12 +2378,53 @@ JsonValue go_report_to_json(const std::string& path, const golang::GoAnalysisRep
     doc["function_count"] = JsonValue(static_cast<std::uint64_t>(rep.functions.size()));
     doc["user_functions"] = JsonValue(static_cast<std::uint64_t>(rep.user_functions));
     doc["runtime_functions"] = JsonValue(static_cast<std::uint64_t>(rep.runtime_functions));
+    doc["struct_count"] = JsonValue(static_cast<std::uint64_t>(rep.structs.size()));
+    doc["interface_count"] = JsonValue(static_cast<std::uint64_t>(rep.interfaces.size()));
+    doc["itab_count"] = JsonValue(static_cast<std::uint64_t>(rep.itabs.size()));
+    doc["golang_source"] = JsonValue(rep.golang_source);
 
     JsonValue pkgs = JsonValue::array();
     for (const auto& pkg : rep.packages) {
         pkgs.push(JsonValue(pkg));
     }
     doc["packages"] = std::move(pkgs);
+
+    JsonValue structs_arr = JsonValue::array();
+    for (const auto& s : rep.structs) {
+        JsonValue s_obj = JsonValue::object();
+        s_obj["name"] = JsonValue(s.name);
+        s_obj["size"] = JsonValue(s.size);
+        s_obj["type_va"] = JsonValue(s.type_va);
+        JsonValue flds = JsonValue::array();
+        for (const auto& f : s.fields) {
+            JsonValue f_obj = JsonValue::object();
+            f_obj["name"] = JsonValue(f.name);
+            f_obj["type"] = JsonValue(f.type_name);
+            f_obj["offset"] = JsonValue(f.offset);
+            flds.push(std::move(f_obj));
+        }
+        s_obj["fields"] = std::move(flds);
+        structs_arr.push(std::move(s_obj));
+    }
+    doc["structs"] = std::move(structs_arr);
+
+    JsonValue itabs_arr = JsonValue::array();
+    for (const auto& itab : rep.itabs) {
+        JsonValue itab_obj = JsonValue::object();
+        itab_obj["interface"] = JsonValue(itab.interface_name);
+        itab_obj["concrete_type"] = JsonValue(itab.concrete_type_name);
+        itab_obj["itab_va"] = JsonValue(itab.itab_va);
+        JsonValue methods = JsonValue::array();
+        for (const auto& m : itab.methods) {
+            JsonValue m_obj = JsonValue::object();
+            m_obj["name"] = JsonValue(m.name);
+            m_obj["va"] = JsonValue(m.fn_va);
+            methods.push(std::move(m_obj));
+        }
+        itab_obj["methods"] = std::move(methods);
+        itabs_arr.push(std::move(itab_obj));
+    }
+    doc["itabs"] = std::move(itabs_arr);
 
     JsonValue fns = JsonValue::array();
     for (const auto& fn : rep.functions) {
@@ -2383,6 +2437,103 @@ JsonValue go_report_to_json(const std::string& path, const golang::GoAnalysisRep
     doc["functions"] = std::move(fns);
 
     return doc;
+}
+
+int command_go(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("go");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph go: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    golang::GoAnalyzer analyzer;
+    auto image_res = core::ExecutableImage::parse(view.value());
+    golang::GoAnalysisReport rep = image_res
+        ? analyzer.analyze(image_res.value())
+        : analyzer.analyze_view(view.value());
+
+    if (auto out_path = args.get("out")) {
+        auto wr = write_file(*out_path, rep.golang_source);
+        if (!wr) {
+            err << "typemorph go: failed to write output file: " << *out_path << '\n';
+            return 1;
+        }
+        out << "Reconstructed Go source saved to: " << *out_path << "\n";
+    }
+
+    if (args.has("source")) {
+        out << rep.golang_source;
+        return 0;
+    }
+
+    if (args.has("json")) {
+        auto doc = go_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph Golang pclntab & Metadata Reconstructor\n"
+        << "  Target: " << path << "\n";
+
+    if (!rep.detected) {
+        out << "  No Go pclntab runtime structures detected (not a Go binary or heavily stripped/encrypted).\n";
+        return 0;
+    }
+
+    char va_buf[32];
+    std::snprintf(va_buf, sizeof(va_buf), "0x%llx", static_cast<unsigned long long>(rep.pclntab_va));
+    out << "  Go Runtime Version: " << golang::to_string(rep.version) << " (" << rep.ptr_size * 8 << "-bit)\n"
+        << "  Pclntab Base VA:    " << va_buf << "\n"
+        << "  Functions Total:    " << rep.functions.size() << " (User: " << rep.user_functions
+        << ", Runtime: " << rep.runtime_functions << ")\n"
+        << "  Unique Packages:    " << rep.packages.size() << "\n"
+        << "  Recovered Structs:  " << rep.structs.size() << "\n"
+        << "  Recovered itabs:    " << rep.itabs.size() << "\n\n";
+
+    if (!rep.structs.empty()) {
+        out << "Recovered Struct Types:\n";
+        for (const auto& s : rep.structs) {
+            out << "  - type " << s.name << " struct (" << s.fields.size() << " fields, " << s.size << " bytes)\n";
+        }
+        out << "\n";
+    }
+
+    if (!rep.itabs.empty()) {
+        out << "Interface Tables (itabs):\n";
+        for (const auto& itab : rep.itabs) {
+            out << "  - " << itab.concrete_type_name << " implements " << itab.interface_name
+                << " (" << itab.methods.size() << " methods)\n";
+        }
+        out << "\n";
+    }
+
+    if (!rep.packages.empty()) {
+        out << "Packages Detected:\n";
+        for (const auto& pkg : rep.packages) {
+            out << "  - " << pkg << "\n";
+        }
+        out << "\n";
+    }
+
+    out << "Functions Sample (first 50):\n";
+    std::size_t limit = std::min<std::size_t>(rep.functions.size(), 50);
+    for (std::size_t i = 0; i < limit; ++i) {
+        const auto& fn = rep.functions[i];
+        char f_buf[32];
+        std::snprintf(f_buf, sizeof(f_buf), "0x%llx", static_cast<unsigned long long>(fn.entry_va));
+        out << "  [" << f_buf << "] " << fn.name << "\n";
+    }
+    if (rep.functions.size() > limit) {
+        out << "  ... and " << (rep.functions.size() - limit) << " more functions (use --json to view all).\n";
+    }
+
+    return 0;
 }
 
 JsonValue rich_report_to_json(const std::string& path, const pe::RichHeaderReport& rep) {
@@ -2414,70 +2565,6 @@ JsonValue rich_report_to_json(const std::string& path, const pe::RichHeaderRepor
     doc["records"] = std::move(recs);
 
     return doc;
-}
-
-int command_go(const Arguments& args, std::ostream& out, std::ostream& err) {
-    if (args.has("help") || args.positional.empty()) {
-        out << command_help("go");
-        return 0;
-    }
-
-    const std::string& path = args.positional[0];
-    auto view = BinaryView::open(path);
-    if (!view) {
-        err << "typemorph go: " << format_error(view.error()) << '\n';
-        return 1;
-    }
-
-    golang::GoAnalyzer analyzer;
-    auto image_res = core::ExecutableImage::parse(view.value());
-    golang::GoAnalysisReport rep = image_res
-        ? analyzer.analyze(image_res.value())
-        : analyzer.analyze_view(view.value());
-
-    if (args.has("json")) {
-        auto doc = go_report_to_json(path, rep);
-        out << doc.dump(2) << '\n';
-        return 0;
-    }
-
-    out << "TypeMorph Golang pclntab & Metadata Reconstructor\n"
-        << "  Target: " << path << "\n";
-
-    if (!rep.detected) {
-        out << "  No Go pclntab runtime structures detected (not a Go binary or heavily stripped/encrypted).\n";
-        return 0;
-    }
-
-    char va_buf[32];
-    std::snprintf(va_buf, sizeof(va_buf), "0x%llx", static_cast<unsigned long long>(rep.pclntab_va));
-    out << "  Go Runtime Version: " << golang::to_string(rep.version) << " (" << rep.ptr_size * 8 << "-bit)\n"
-        << "  Pclntab Base VA:    " << va_buf << "\n"
-        << "  Functions Total:    " << rep.functions.size() << " (User: " << rep.user_functions
-        << ", Runtime: " << rep.runtime_functions << ")\n"
-        << "  Unique Packages:    " << rep.packages.size() << "\n\n";
-
-    if (!rep.packages.empty()) {
-        out << "Packages Detected:\n";
-        for (const auto& pkg : rep.packages) {
-            out << "  - " << pkg << "\n";
-        }
-        out << "\n";
-    }
-
-    out << "Functions Sample (first 50):\n";
-    std::size_t limit = std::min<std::size_t>(rep.functions.size(), 50);
-    for (std::size_t i = 0; i < limit; ++i) {
-        const auto& fn = rep.functions[i];
-        char f_buf[32];
-        std::snprintf(f_buf, sizeof(f_buf), "0x%llx", static_cast<unsigned long long>(fn.entry_va));
-        out << "  [" << f_buf << "] " << fn.name << "\n";
-    }
-    if (rep.functions.size() > limit) {
-        out << "  ... and " << (rep.functions.size() - limit) << " more functions (use --json to view all).\n";
-    }
-
-    return 0;
 }
 
 int command_rich(const Arguments& args, std::ostream& out, std::ostream& err) {
@@ -2662,6 +2749,224 @@ int command_abi(const Arguments& args, std::ostream& out, std::ostream& err) {
     return 0;
 }
 
+JsonValue dotnet_report_to_json(const std::string& path, const dotnet::DotNetReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["is_dotnet"] = JsonValue(rep.is_dotnet);
+    doc["runtime_version"] = JsonValue(rep.runtime_version);
+    doc["cli_header_rva"] = JsonValue(static_cast<std::uint64_t>(rep.cli_header_rva));
+    doc["metadata_rva"] = JsonValue(static_cast<std::uint64_t>(rep.metadata_rva));
+    doc["entry_point_token"] = JsonValue(static_cast<std::uint64_t>(rep.entry_point_token));
+    doc["type_count"] = JsonValue(static_cast<std::uint64_t>(rep.type_count));
+    doc["method_count"] = JsonValue(static_cast<std::uint64_t>(rep.method_count));
+    doc["field_count"] = JsonValue(static_cast<std::uint64_t>(rep.field_count));
+    doc["csharp_source"] = JsonValue(rep.csharp_source);
+
+    JsonValue types_arr = JsonValue::array();
+    for (const auto& t : rep.types) {
+        JsonValue t_obj = JsonValue::object();
+        t_obj["name"] = JsonValue(t.name);
+        t_obj["namespace"] = JsonValue(t.namespace_name);
+        t_obj["full_name"] = JsonValue(t.full_name);
+        t_obj["base_type"] = JsonValue(t.base_type);
+        t_obj["is_interface"] = JsonValue(t.is_interface);
+        t_obj["is_enum"] = JsonValue(t.is_enum);
+        t_obj["is_value_type"] = JsonValue(t.is_value_type);
+
+        JsonValue f_arr = JsonValue::array();
+        for (const auto& f : t.fields) {
+            JsonValue f_obj = JsonValue::object();
+            f_obj["name"] = JsonValue(f.name);
+            f_obj["type"] = JsonValue(f.type_name);
+            f_obj["is_public"] = JsonValue(f.is_public);
+            f_obj["is_private"] = JsonValue(f.is_private);
+            f_obj["is_static"] = JsonValue(f.is_static);
+            f_arr.push(std::move(f_obj));
+        }
+        t_obj["fields"] = std::move(f_arr);
+
+        JsonValue m_arr = JsonValue::array();
+        for (const auto& m : t.methods) {
+            JsonValue m_obj = JsonValue::object();
+            m_obj["name"] = JsonValue(m.name);
+            m_obj["return_type"] = JsonValue(m.return_type);
+            m_obj["rva"] = JsonValue(static_cast<std::uint64_t>(m.rva));
+            m_obj["is_public"] = JsonValue(m.is_public);
+            m_obj["is_static"] = JsonValue(m.is_static);
+            m_arr.push(std::move(m_obj));
+        }
+        t_obj["methods"] = std::move(m_arr);
+
+        types_arr.push(std::move(t_obj));
+    }
+    doc["types"] = std::move(types_arr);
+    return doc;
+}
+
+int command_csharp(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("csharp");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph csharp: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    dotnet::DotNetAnalyzer analyzer;
+    auto rep = analyzer.analyze_view(view.value());
+    if (!rep.is_dotnet) {
+        err << "typemorph csharp: target is not a valid .NET / CLR binary (no CLI header found)\n";
+        return 1;
+    }
+    rep.csharp_source = dotnet::DotNetAnalyzer::to_csharp(rep);
+
+    if (auto out_path = args.get("out")) {
+        auto wr = write_file(*out_path, rep.csharp_source);
+        if (!wr) {
+            err << "typemorph csharp: failed to write output file: " << *out_path << '\n';
+            return 1;
+        }
+        out << "Decompiled C# source saved to: " << *out_path << "\n";
+    }
+
+    if (args.has("json")) {
+        auto doc = dotnet_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    if (!args.has("out")) {
+        out << rep.csharp_source;
+    }
+    return 0;
+}
+
+JsonValue decompile_report_to_json(const std::string& path, const decompile::DecompileReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["total_functions"] = JsonValue(static_cast<std::uint64_t>(rep.total_functions));
+    doc["combined_source"] = JsonValue(rep.combined_source);
+
+    JsonValue structs_arr = JsonValue::array();
+    for (const auto& s : rep.global_structs) {
+        JsonValue s_obj = JsonValue::object();
+        s_obj["name"] = JsonValue(s.name);
+        s_obj["total_size"] = JsonValue(static_cast<std::uint64_t>(s.total_size));
+        s_obj["c_declaration"] = JsonValue(s.c_declaration);
+        structs_arr.push(std::move(s_obj));
+    }
+    doc["structs"] = std::move(structs_arr);
+
+    JsonValue fns_arr = JsonValue::array();
+    for (const auto& fn : rep.functions) {
+        JsonValue fn_obj = JsonValue::object();
+        fn_obj["entry_va"] = JsonValue(fn.entry_va);
+        fn_obj["name"] = JsonValue(fn.name);
+        fn_obj["prototype"] = JsonValue(fn.prototype);
+        fn_obj["pseudocode"] = JsonValue(fn.pseudocode);
+        fns_arr.push(std::move(fn_obj));
+    }
+    doc["functions"] = std::move(fns_arr);
+    return doc;
+}
+
+int command_decompile(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("decompile");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph decompile: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto image_res = core::ExecutableImage::parse(view.value());
+    if (!image_res) {
+        err << "typemorph decompile: " << format_error(image_res.error()) << '\n';
+        return 1;
+    }
+
+    std::string lang = args.get_or("lang", "c");
+    if (lang == "rust" || lang == "rs") {
+        derust::RustSourceReconstructor reconstructor;
+        auto rust_rep = reconstructor.reconstruct(image_res.value());
+        rust_rep.rust_source = derust::RustSourceReconstructor::to_rust_source(rust_rep);
+
+        if (auto out_path = args.get("out")) {
+            auto wr = write_file(*out_path, rust_rep.rust_source);
+            if (!wr) {
+                err << "typemorph decompile: failed to write output: " << *out_path << '\n';
+                return 1;
+            }
+            out << "Reconstructed Rust source saved to: " << *out_path << "\n";
+        }
+        if (args.has("json")) {
+            JsonValue doc = JsonValue::object();
+            doc["file"] = JsonValue(path);
+            doc["lang"] = JsonValue("rust");
+            doc["has_rust_artifacts"] = JsonValue(rust_rep.has_rust_artifacts);
+            doc["trait_count"] = JsonValue(static_cast<std::uint64_t>(rust_rep.traits.size()));
+            doc["rust_source"] = JsonValue(rust_rep.rust_source);
+            out << doc.dump(2) << '\n';
+            return 0;
+        }
+        if (!args.has("out")) {
+            out << rust_rep.rust_source;
+        }
+        return 0;
+    }
+
+    std::optional<std::uint64_t> target_va;
+    if (auto fn_str = args.get("function")) {
+        auto val = parse_u64(*fn_str, "function");
+        if (!val) {
+            std::string_view sv = *fn_str;
+            if (sv.starts_with("0x") || sv.starts_with("0X")) sv.remove_prefix(2);
+            char* end_ptr = nullptr;
+            std::string clean(sv);
+            std::uint64_t hex_va = std::strtoull(clean.c_str(), &end_ptr, 16);
+            if (end_ptr != clean.c_str() && *end_ptr == '\0') {
+                target_va = hex_va;
+            } else {
+                err << "typemorph decompile: invalid function address " << *fn_str << '\n';
+                return 1;
+            }
+        } else {
+            target_va = val.value();
+        }
+    }
+
+    decompile::CDecompiler decompiler;
+    auto rep = decompiler.decompile(image_res.value(), target_va);
+
+    if (auto out_path = args.get("out")) {
+        auto wr = write_file(*out_path, rep.combined_source);
+        if (!wr) {
+            err << "typemorph decompile: failed to write output: " << *out_path << '\n';
+            return 1;
+        }
+        out << "Decompiled C code saved to: " << *out_path << "\n";
+    }
+
+    if (args.has("json")) {
+        auto doc = decompile_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    if (!args.has("out")) {
+        out << rep.combined_source;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -2755,6 +3060,9 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("go"));
         capabilities.push(JsonValue("rich"));
         capabilities.push(JsonValue("abi"));
+        capabilities.push(JsonValue("csharp"));
+        capabilities.push(JsonValue("dotnet"));
+        capabilities.push(JsonValue("decompile"));
         result["capabilities"] = std::move(capabilities);
         return result;
     }
@@ -3345,6 +3653,46 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         auto rep = classifier.analyze(image_res.value(), target_va);
         return abi_report_to_json(file.value(), rep);
     }
+    if (method == "csharp" || method == "typemorph.csharp" ||
+        method == "dotnet" || method == "typemorph.dotnet") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        dotnet::DotNetAnalyzer analyzer;
+        auto rep = analyzer.analyze_view(view_result.value());
+        rep.csharp_source = dotnet::DotNetAnalyzer::to_csharp(rep);
+        return dotnet_report_to_json(file.value(), rep);
+    }
+    if (method == "decompile" || method == "typemorph.decompile") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto image_res = core::ExecutableImage::parse(view_result.value());
+        if (!image_res) return image_res.error();
+        auto lang = json_string_field(params, "lang", false).value_or("c");
+        if (lang == "rust" || lang == "rs") {
+            derust::RustSourceReconstructor reconstructor;
+            auto rust_rep = reconstructor.reconstruct(image_res.value());
+            rust_rep.rust_source = derust::RustSourceReconstructor::to_rust_source(rust_rep);
+            JsonValue doc = JsonValue::object();
+            doc["file"] = JsonValue(file.value());
+            doc["lang"] = JsonValue("rust");
+            doc["has_rust_artifacts"] = JsonValue(rust_rep.has_rust_artifacts);
+            doc["trait_count"] = JsonValue(static_cast<std::uint64_t>(rust_rep.traits.size()));
+            doc["rust_source"] = JsonValue(rust_rep.rust_source);
+            return doc;
+        }
+        std::optional<std::uint64_t> target_va;
+        const auto* fn_val = params.find("function");
+        if (fn_val && fn_val->as_int()) {
+            target_va = static_cast<std::uint64_t>(*fn_val->as_int());
+        }
+        decompile::CDecompiler decompiler;
+        auto rep = decompiler.decompile(image_res.value(), target_va);
+        return decompile_report_to_json(file.value(), rep);
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -3607,8 +3955,8 @@ int Application::run(std::span<const std::string_view> args) {
     }
     if (command == "go") {
         auto parsed = parse_arguments(
-            rest, {},
-            {}, 1, 1);
+            rest, {"out"},
+            {"source"}, 1, 1);
         if (!parsed) {
             err_ << usage_error(parsed.error().message) << '\n';
             return 2;
@@ -3634,6 +3982,26 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_abi(parsed.value(), out_, err_);
+    }
+    if (command == "csharp" || command == "dotnet") {
+        auto parsed = parse_arguments(
+            rest, {"out"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_csharp(parsed.value(), out_, err_);
+    }
+    if (command == "decompile") {
+        auto parsed = parse_arguments(
+            rest, {"function", "lang", "out"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_decompile(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";
