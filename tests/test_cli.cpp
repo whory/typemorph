@@ -395,6 +395,12 @@ TEST_CASE("cli: dex displays help") {
     CHECK(help_res.out.find("Android Dalvik") != std::string::npos);
 }
 
+TEST_CASE("cli: vb displays help") {
+    const auto help_res = invoke({"vb", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("Visual Basic 5.0/6.0") != std::string::npos);
+}
+
 
 
 

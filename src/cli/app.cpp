@@ -39,6 +39,7 @@
 #include "typemorph/tui/dashboard.hpp"
 #include "typemorph/delphi/delphi_analyzer.hpp"
 #include "typemorph/dex/dex_analyzer.hpp"
+#include "typemorph/vb/vb_analyzer.hpp"
 #ifdef _WIN32
 #include "typemorph/gui/studio_app.hpp"
 #endif
@@ -730,6 +731,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph dex <classes.dex> [--java] [--json]\n"
                "Android Dalvik Executable (DEX) & Java Decompiler Engine (JADX style): decompiles Dalvik bytecode to Java classes.\n";
     }
+    if (command == "vb" || command == "vbdecompiler" || command == "vb6") {
+        return "Usage: typemorph vb <binary> [--source] [--json]\n"
+               "Visual Basic 5.0/6.0 Native & P-Code Analyzer: extracts forms, maps event procedures, and reconstructs VB source code.\n";
+    }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
                "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
@@ -749,6 +754,7 @@ std::string command_help(std::string_view command) {
            "  dotnet-clean <bin>   Advanced .NET deobfuscator (inlines proxies, decrypts strings, kills switch)\n"
            "  delphi <binary>      Delphi / C++Builder VCL Form Rescuer & event handler mapper (IDR / DeDe)\n"
            "  dex <classes.dex>    Android Dalvik DEX & Java decompiler engine (JADX style)\n"
+           "  vb <binary>          Visual Basic 5.0/6.0 P-Code & Native analyzer (VB Decompiler)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
@@ -3904,6 +3910,34 @@ int command_dex(const Arguments& args, std::ostream& out, std::ostream& err) {
     return 0;
 }
 
+int command_vb(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("vb");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph vb: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto rep = vb::VbAnalyzer::analyze(view.value());
+    if (!rep.is_vb) {
+        err << "typemorph vb: no Visual Basic 5.0/6.0 signatures found in " << path << ".\n";
+        return 1;
+    }
+
+    if (args.has("source")) {
+        out << vb::VbAnalyzer::to_vb_source(rep);
+        return 0;
+    }
+
+    out << vb::VbAnalyzer::format_report(rep);
+    return 0;
+}
+
 
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -5184,6 +5218,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_dex(parsed.value(), out_, err_);
+    }
+    if (command == "vb" || command == "vbdecompiler" || command == "vb6") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {"source"}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_vb(parsed.value(), out_, err_);
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {
