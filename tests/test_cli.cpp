@@ -401,6 +401,12 @@ TEST_CASE("cli: vb displays help") {
     CHECK(help_res.out.find("Visual Basic 5.0/6.0") != std::string::npos);
 }
 
+TEST_CASE("cli: autoit displays help") {
+    const auto help_res = invoke({"autoit", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("AutoIt v3") != std::string::npos);
+}
+
 
 
 

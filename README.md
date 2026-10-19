@@ -223,6 +223,10 @@ typemorph dex classes.dex --java
 typemorph vb project1.exe
 typemorph vb project1.exe --source
 
+# AutoIt v3 Script Extractor & Decompiler (Exe2Aut engine)
+typemorph autoit compiled.exe
+typemorph autoit compiled.exe --out=extracted.au3
+
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe
 

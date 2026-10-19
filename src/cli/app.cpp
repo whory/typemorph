@@ -40,6 +40,7 @@
 #include "typemorph/delphi/delphi_analyzer.hpp"
 #include "typemorph/dex/dex_analyzer.hpp"
 #include "typemorph/vb/vb_analyzer.hpp"
+#include "typemorph/autoit/autoit_decompiler.hpp"
 #ifdef _WIN32
 #include "typemorph/gui/studio_app.hpp"
 #endif
@@ -735,6 +736,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph vb <binary> [--source] [--json]\n"
                "Visual Basic 5.0/6.0 Native & P-Code Analyzer: extracts forms, maps event procedures, and reconstructs VB source code.\n";
     }
+    if (command == "autoit" || command == "exe2aut" || command == "au3") {
+        return "Usage: typemorph autoit <binary> [--out=script.au3] [--json]\n"
+               "AutoIt v3 Script Extractor & Decompiler (Exe2Aut engine): extracts embedded .au3 scripts and decodes tokens.\n";
+    }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
                "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
@@ -755,6 +760,7 @@ std::string command_help(std::string_view command) {
            "  delphi <binary>      Delphi / C++Builder VCL Form Rescuer & event handler mapper (IDR / DeDe)\n"
            "  dex <classes.dex>    Android Dalvik DEX & Java decompiler engine (JADX style)\n"
            "  vb <binary>          Visual Basic 5.0/6.0 P-Code & Native analyzer (VB Decompiler)\n"
+           "  autoit <binary>      AutoIt v3 Script Extractor & token decompiler (Exe2Aut)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
@@ -3938,6 +3944,41 @@ int command_vb(const Arguments& args, std::ostream& out, std::ostream& err) {
     return 0;
 }
 
+int command_autoit(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("autoit");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph autoit: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto rep = autoit::AutoItDecompiler::analyze(view.value());
+    if (!rep.is_autoit) {
+        err << "typemorph autoit: no AutoIt v3 signatures found in " << path << ".\n";
+        return 1;
+    }
+
+    if (args.has("out")) {
+        const std::string out_path = args.get("out").value();
+        std::ofstream file(out_path);
+        if (!file) {
+            err << "typemorph autoit: cannot open " << out_path << " for writing.\n";
+            return 1;
+        }
+        file << rep.primary_script;
+        out << "typemorph autoit: decompiled script saved to " << out_path << "\n";
+        return 0;
+    }
+
+    out << autoit::AutoItDecompiler::format_report(rep);
+    return 0;
+}
+
 
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -5228,6 +5269,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_vb(parsed.value(), out_, err_);
+    }
+    if (command == "autoit" || command == "exe2aut" || command == "au3") {
+        auto parsed = parse_arguments(
+            rest, {"out"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_autoit(parsed.value(), out_, err_);
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {
