@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <fstream>
@@ -92,20 +93,93 @@ HWND g_hwndCode   = nullptr;
 HWND g_hwndLog    = nullptr;
 HWND g_hwndStatus = nullptr;
 
+std::vector<HWND> g_toolbarButtons;
+
+struct ToolbarBtnDef {
+    int id;
+    const wchar_t* label;
+    int width;
+};
+
+const ToolbarBtnDef kToolBtns[] = {
+    {IDM_FILE_OPEN,        L"Open Binary",      88},
+    {IDM_FILE_SAVE_AS,     L"Save Code",        74},
+    {IDM_ACTION_DEOBF,     L"Deobfuscate",      84},
+    {IDM_ACTION_DETECT,    L"Detect (DIE)",     84},
+    {IDM_ACTION_VMPROFILE, L"VMProfiler",       78},
+    {IDM_ACTION_CHECKSEC,  L"checksec",         64},
+    {IDM_ACTION_ABI,       L"ABI / Subs",       74},
+    {IDM_ACTION_STRINGS,   L"Strings",          58},
+    {IDM_ACTION_CRYPTO,    L"Crypto",           56},
+    {IDM_ACTION_IATFIX,    L"IAT Fix",          58},
+    {IDM_ACTION_INFER,     L"Infer Schema",     88},
+    {IDM_VIEW_C,           L"C Pseudocode",     90},
+    {IDM_VIEW_CSHARP,      L"C# (.NET)",        70},
+    {IDM_VIEW_RUST,        L"Rust",             48},
+    {IDM_VIEW_GO,          L"Go",               38},
+    {IDM_HELP_ABOUT,       L"About",            48},
+};
+
 HFONT g_hFontCode   = nullptr;
 HFONT g_hFontUI     = nullptr;
+HFONT g_hFontBtn    = nullptr;
 HBRUSH g_hBrushDark = nullptr;
 HBRUSH g_hBrushTree = nullptr;
 
 StudioApp* g_pApp = nullptr;
 
-std::wstring to_wide(const std::string& str) {
+std::string to_wide_hex(std::uint64_t val) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%llx", static_cast<unsigned long long>(val));
+    return std::string(buf);
+}
+
+std::string format_hex_dump(std::span<const std::uint8_t> data, std::uint64_t base_offset = 0, std::size_t max_bytes = 256) {
+    std::ostringstream ss;
+    std::size_t count = std::min(data.size(), max_bytes);
+    for (std::size_t i = 0; i < count; i += 16) {
+        char line_addr[32];
+        std::snprintf(line_addr, sizeof(line_addr), "%08llx  ", static_cast<unsigned long long>(base_offset + i));
+        ss << line_addr;
+
+        for (std::size_t j = 0; j < 16; ++j) {
+            if (i + j < count) {
+                char b_buf[8];
+                std::snprintf(b_buf, sizeof(b_buf), "%02x ", data[i + j]);
+                ss << b_buf;
+            } else {
+                ss << "   ";
+            }
+            if (j == 7) ss << " ";
+        }
+        ss << " |";
+
+        for (std::size_t j = 0; j < 16; ++j) {
+            if (i + j < count) {
+                std::uint8_t b = data[i + j];
+                ss << ((b >= 32 && b <= 126) ? static_cast<char>(b) : '.');
+            } else {
+                ss << ' ';
+            }
+        }
+        ss << "|\n";
+    }
+    if (data.size() > max_bytes) {
+        ss << "  ... (" << (data.size() - max_bytes) << " additional bytes truncated) ...\n";
+    }
+    return ss.str();
+}
+
+std::wstring to_wide(std::string_view str) {
     if (str.empty()) return L"";
-    int sz = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+    int sz = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), nullptr, 0);
     std::wstring out(sz, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &out[0], sz);
-    if (!out.empty() && out.back() == L'\0') out.pop_back();
+    MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), &out[0], sz);
     return out;
+}
+
+std::wstring to_wide(const std::string& str) {
+    return to_wide(std::string_view(str));
 }
 
 std::wstring normalize_crlf(const std::string& text) {
@@ -133,215 +207,35 @@ void SetStatusBarText(int part, const std::string& text) {
     SendMessageW(g_hwndStatus, SB_SETTEXTW, part, reinterpret_cast<LPARAM>(wtext.c_str()));
 }
 
-void PopulateTree(const std::string& filename,
-                  const dotnet::DotNetReport& dotnet_rep,
-                  const delphi::DelphiReport& delphi_rep,
-                  const dex::DexReport& dex_rep,
-                  const vb::VbReport& vb_rep,
-                  const vm::VmProfileReport& vm_rep,
-                  const golang::GoAnalysisReport& go_rep,
-                  const lua::LuaDecompileReport& lua_rep) {
-    if (!g_hwndTree) return;
-    SendMessageW(g_hwndTree, TVM_DELETEITEM, 0, reinterpret_cast<LPARAM>(TVI_ROOT));
+typedef void (WINAPI *pfnDragAcceptFiles)(HWND, BOOL);
+typedef UINT (WINAPI *pfnDragQueryFileW)(HDROP, UINT, LPWSTR, UINT);
+typedef void (WINAPI *pfnDragFinish)(HDROP);
 
-    TVINSERTSTRUCTW tvis = {};
-    tvis.hParent = TVI_ROOT;
-    tvis.hInsertAfter = TVI_LAST;
-    tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
-
-    std::wstring wfile = to_wide(filename.empty() ? "Assembly.dll" : filename);
-    tvis.item.pszText = const_cast<LPWSTR>(wfile.c_str());
-    tvis.item.lParam = 0;
-    HTREEITEM hRoot = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-    // 1. .NET Types & Namespaces
-    if (dotnet_rep.is_dotnet) {
-        std::map<std::string, std::vector<const dotnet::DotNetType*>> by_ns;
-        for (const auto& t : dotnet_rep.types) by_ns[t.namespace_name].push_back(&t);
-
-        for (const auto& [ns, types] : by_ns) {
-            HTREEITEM hNs = hRoot;
-            if (!ns.empty()) {
-                std::wstring wns = to_wide("Namespace: " + ns);
-                tvis.hParent = hRoot;
-                tvis.item.pszText = const_cast<LPWSTR>(wns.c_str());
-                hNs = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-            }
-
-            for (const auto* t : types) {
-                std::wstring wtname = to_wide("class " + t->name);
-                tvis.hParent = hNs;
-                tvis.item.pszText = const_cast<LPWSTR>(wtname.c_str());
-                HTREEITEM hType = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-                for (const auto& m : t->methods) {
-                    std::string mdesc = m.name + "() : " + m.return_type;
-                    std::wstring wmname = to_wide(mdesc);
-                    TVINSERTSTRUCTW m_ins = {};
-                    m_ins.hParent = hType;
-                    m_ins.hInsertAfter = TVI_LAST;
-                    m_ins.item.mask = TVIF_TEXT;
-                    m_ins.item.pszText = const_cast<LPWSTR>(wmname.c_str());
-                    SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&m_ins));
-                }
-            }
-        }
+inline void SafeDragAcceptFiles(HWND hwnd, BOOL accept) {
+    HMODULE hShell = LoadLibraryA("shell32.dll");
+    if (hShell) {
+        auto pfn = reinterpret_cast<pfnDragAcceptFiles>(GetProcAddress(hShell, "DragAcceptFiles"));
+        if (pfn) pfn(hwnd, accept);
     }
+}
 
-    // 2. Delphi VCL Forms & Units
-    if (delphi_rep.is_delphi) {
-        std::wstring wdelphi = L"Delphi VCL Architecture (" + to_wide(delphi_rep.compiler_version) + L")";
-        tvis.hParent = hRoot;
-        tvis.item.pszText = const_cast<LPWSTR>(wdelphi.c_str());
-        HTREEITEM hDelphi = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-        for (const auto& form : delphi_rep.forms) {
-            std::wstring wform = to_wide("Form: " + form.form_name + " (" + form.class_name + ")");
-            tvis.hParent = hDelphi;
-            tvis.item.pszText = const_cast<LPWSTR>(wform.c_str());
-            HTREEITEM hForm = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-            for (const auto& ev : form.root_component.events) {
-                std::ostringstream ss;
-                ss << ev.event_name << " -> " << ev.handler_name << " [VA: 0x" << std::hex << ev.handler_va << "]";
-                std::wstring wev = to_wide(ss.str());
-                TVINSERTSTRUCTW ev_ins = {};
-                ev_ins.hParent = hForm;
-                ev_ins.hInsertAfter = TVI_LAST;
-                ev_ins.item.mask = TVIF_TEXT;
-                ev_ins.item.pszText = const_cast<LPWSTR>(wev.c_str());
-                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ev_ins));
-            }
-        }
+inline UINT SafeDragQueryFileW(HDROP hDrop, UINT iFile, LPWSTR lpszFile, UINT cch) {
+    HMODULE hShell = GetModuleHandleA("shell32.dll");
+    if (!hShell) hShell = LoadLibraryA("shell32.dll");
+    if (hShell) {
+        auto pfn = reinterpret_cast<pfnDragQueryFileW>(GetProcAddress(hShell, "DragQueryFileW"));
+        if (pfn) return pfn(hDrop, iFile, lpszFile, cch);
     }
+    return 0;
+}
 
-    // 3. Android Dalvik DEX Classes
-    if (dex_rep.is_dex) {
-        std::wstring wdex = L"Dalvik DEX Packages (" + std::to_wstring(dex_rep.classes.size()) + L" classes)";
-        tvis.hParent = hRoot;
-        tvis.item.pszText = const_cast<LPWSTR>(wdex.c_str());
-        HTREEITEM hDex = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-        for (const auto& cls : dex_rep.classes) {
-            std::wstring wcls = to_wide(cls.name);
-            tvis.hParent = hDex;
-            tvis.item.pszText = const_cast<LPWSTR>(wcls.c_str());
-            HTREEITEM hC = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-            for (const auto& m : cls.methods) {
-                std::wstring wm = to_wide(m.name + " (" + std::to_string(m.instructions.size()) + " insns)");
-                TVINSERTSTRUCTW m_ins = {};
-                m_ins.hParent = hC;
-                m_ins.hInsertAfter = TVI_LAST;
-                m_ins.item.mask = TVIF_TEXT;
-                m_ins.item.pszText = const_cast<LPWSTR>(wm.c_str());
-                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&m_ins));
-            }
-        }
+inline void SafeDragFinish(HDROP hDrop) {
+    HMODULE hShell = GetModuleHandleA("shell32.dll");
+    if (!hShell) hShell = LoadLibraryA("shell32.dll");
+    if (hShell) {
+        auto pfn = reinterpret_cast<pfnDragFinish>(GetProcAddress(hShell, "DragFinish"));
+        if (pfn) pfn(hDrop);
     }
-
-    // 4. Visual Basic 5/6 Forms & Events
-    if (vb_rep.is_vb) {
-        std::string mode_str = vb_rep.is_pcode ? "P-Code" : "Native Code";
-        std::wstring wvb = to_wide("VB6 Project (" + mode_str + ")");
-        tvis.hParent = hRoot;
-        tvis.item.pszText = const_cast<LPWSTR>(wvb.c_str());
-        HTREEITEM hVb = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-        for (const auto& mod : vb_rep.modules) {
-            std::wstring wmod = to_wide(mod.kind + ": " + mod.name);
-            tvis.hParent = hVb;
-            tvis.item.pszText = const_cast<LPWSTR>(wmod.c_str());
-            HTREEITEM hMod = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-            for (const auto& ev : mod.events) {
-                std::ostringstream ss;
-                ss << ev.object_name << "_" << ev.event_name << " [VA: 0x" << std::hex << ev.code_va << "]";
-                std::wstring wev = to_wide(ss.str());
-                TVINSERTSTRUCTW ev_ins = {};
-                ev_ins.hParent = hMod;
-                ev_ins.hInsertAfter = TVI_LAST;
-                ev_ins.item.mask = TVIF_TEXT;
-                ev_ins.item.pszText = const_cast<LPWSTR>(wev.c_str());
-                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ev_ins));
-            }
-        }
-    }
-
-    // 5. VM Architecture & Handlers
-    if (vm_rep.is_virtualized) {
-        std::wstring wvm = to_wide("VM Virtualization: " + vm_rep.detected_protector);
-        tvis.hParent = hRoot;
-        tvis.item.pszText = const_cast<LPWSTR>(wvm.c_str());
-        HTREEITEM hVm = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-        for (std::size_t i = 0; i < vm_rep.vm_entries.size(); ++i) {
-            const auto& e = vm_rep.vm_entries[i];
-            std::ostringstream ss;
-            ss << "VM Entry [0x" << std::hex << e.entry_va << "] Handlers (" << std::dec << e.identified_handlers.size() << ")";
-            std::wstring we = to_wide(ss.str());
-            tvis.hParent = hVm;
-            tvis.item.pszText = const_cast<LPWSTR>(we.c_str());
-            HTREEITEM hEntry = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-            for (const auto& h : e.identified_handlers) {
-                std::ostringstream hss;
-                hss << h.type << " [0x" << std::hex << h.address << "] (" << std::dec << h.size << " B)";
-                std::wstring wh = to_wide(hss.str());
-                TVINSERTSTRUCTW h_ins = {};
-                h_ins.hParent = hEntry;
-                h_ins.hInsertAfter = TVI_LAST;
-                h_ins.item.mask = TVIF_TEXT;
-                h_ins.item.pszText = const_cast<LPWSTR>(wh.c_str());
-                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&h_ins));
-            }
-        }
-    }
-
-    // 6. Go pclntab & Metadata (if present)
-    if (go_rep.detected) {
-        std::wstring wgo = to_wide("Go Runtime (" + std::string(golang::to_string(go_rep.version)) + ")");
-        tvis.hParent = hRoot;
-        tvis.item.pszText = const_cast<LPWSTR>(wgo.c_str());
-        HTREEITEM hGo = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-        for (const auto& s : go_rep.structs) {
-            std::wstring ws = to_wide("type " + s.name + " struct");
-            TVINSERTSTRUCTW s_ins = {};
-            s_ins.hParent = hGo;
-            s_ins.hInsertAfter = TVI_LAST;
-            s_ins.item.mask = TVIF_TEXT;
-            s_ins.item.pszText = const_cast<LPWSTR>(ws.c_str());
-            SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&s_ins));
-        }
-        for (std::size_t i = 0; i < std::min<std::size_t>(go_rep.functions.size(), 50); ++i) {
-            std::wstring wf = to_wide("func " + go_rep.functions[i].name);
-            TVINSERTSTRUCTW f_ins = {};
-            f_ins.hParent = hGo;
-            f_ins.hInsertAfter = TVI_LAST;
-            f_ins.item.mask = TVIF_TEXT;
-            f_ins.item.pszText = const_cast<LPWSTR>(wf.c_str());
-            SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&f_ins));
-        }
-    }
-
-    // 7. Lua Bytecode Functions
-    if (lua_rep.is_lua_bytecode) {
-        std::wstring wlua = to_wide("Lua Bytecode (" + std::string(lua::to_string(lua_rep.flavor)) + ")");
-        tvis.hParent = hRoot;
-        tvis.item.pszText = const_cast<LPWSTR>(wlua.c_str());
-        HTREEITEM hLua = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
-
-        std::wstring wr = to_wide("main (root chunk) [" + std::to_string(lua_rep.root_function.instructions.size()) + " insns]");
-        TVINSERTSTRUCTW r_ins = {};
-        r_ins.hParent = hLua;
-        r_ins.hInsertAfter = TVI_LAST;
-        r_ins.item.mask = TVIF_TEXT;
-        r_ins.item.pszText = const_cast<LPWSTR>(wr.c_str());
-        SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&r_ins));
-    }
-
-    SendMessageW(g_hwndTree, TVM_EXPAND, TVE_EXPAND, reinterpret_cast<LPARAM>(hRoot));
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -365,16 +259,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_hwndTree = CreateWindowExW(
             WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
             WS_CHILD | WS_VISIBLE | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
-            0, 0, 280, 400, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TREEVIEW)),
+            0, 32, 300, 400, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TREEVIEW)),
             GetModuleHandleW(nullptr), nullptr);
 
         SendMessageW(g_hwndTree, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontUI), TRUE);
+        TreeView_SetBkColor(g_hwndTree, kClrTreeBg);
+        TreeView_SetTextColor(g_hwndTree, kClrText);
 
         // Multi-Language Code & Disassembly View
         g_hwndCode = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY,
-            280, 0, 600, 400, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CODE_EDITOR)),
+            300, 32, 600, 400, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CODE_EDITOR)),
             GetModuleHandleW(nullptr), nullptr);
 
         SendMessageW(g_hwndCode, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontCode), TRUE);
@@ -383,10 +279,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_hwndLog = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
-            0, 400, 880, 150, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LOG_LIST)),
+            0, 400, 900, 140, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LOG_LIST)),
             GetModuleHandleW(nullptr), nullptr);
 
         SendMessageW(g_hwndLog, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontCode), TRUE);
+
+        // Quick Action Toolbar Buttons
+        g_toolbarButtons.clear();
+        for (const auto& btn : kToolBtns) {
+            HWND hBtn = CreateWindowExW(
+                0, L"BUTTON", btn.label,
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, btn.width, 24, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(btn.id)),
+                GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hBtn, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontUI), TRUE);
+            g_toolbarButtons.push_back(hBtn);
+        }
+
+        // Drag & Drop binary files onto window (dynamically resolved)
+        SafeDragAcceptFiles(hwnd, TRUE);
 
         // Status Bar
         g_hwndStatus = CreateWindowExW(
@@ -395,14 +307,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS_BAR)),
             GetModuleHandleW(nullptr), nullptr);
 
-        int parts[] = {320, 600, -1};
+        int parts[] = {360, 720, -1};
         SendMessageW(g_hwndStatus, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
         SetStatusBarText(0, "Ready - TypeMorph Decompiler Studio");
         SetStatusBarText(1, "dnSpy / dotPeek Architecture");
         SetStatusBarText(2, "TypeMorph v0.7.0 C++20");
 
         LogMessage("// TypeMorph Studio native Win32 desktop UI initialized.");
-        LogMessage("// Supports .NET, C/C++, Rust, Dalvik DEX, Delphi, VB6, AutoIt, UPX, VFS & VMProtect.");
+        LogMessage("// Drag-and-drop or Open any PE64, ELF, Mach-O, .NET, DEX, Delphi or VMProtect binary.");
+        return 0;
+    }
+
+    case WM_DROPFILES: {
+        HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+        wchar_t szFile[MAX_PATH] = L"";
+        if (SafeDragQueryFileW(hDrop, 0, szFile, MAX_PATH)) {
+            char path_mb[MAX_PATH];
+            WideCharToMultiByte(CP_UTF8, 0, szFile, -1, path_mb, MAX_PATH, nullptr, nullptr);
+            if (g_pApp) g_pApp->open_file(path_mb);
+        }
+        SafeDragFinish(hDrop);
         return 0;
     }
 
@@ -415,17 +339,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         GetWindowRect(g_hwndStatus, &rcStatus);
         int status_h = rcStatus.bottom - rcStatus.top;
 
+        int top_bar_h = 32;
+        int cur_x = 4;
+        for (std::size_t i = 0; i < g_toolbarButtons.size(); ++i) {
+            MoveWindow(g_toolbarButtons[i], cur_x, 4, kToolBtns[i].width, 24, TRUE);
+            cur_x += kToolBtns[i].width + 4;
+        }
+
         int log_h = 140;
-        int tree_w = 280;
-        int main_h = h - status_h - log_h;
+        int tree_w = 300;
+        int main_h = h - status_h - log_h - top_bar_h;
         if (main_h < 50) main_h = 50;
 
-        MoveWindow(g_hwndTree, 0, 0, tree_w, main_h, TRUE);
-        MoveWindow(g_hwndCode, tree_w, 0, w - tree_w, main_h, TRUE);
-        MoveWindow(g_hwndLog, 0, main_h, w, log_h, TRUE);
+        MoveWindow(g_hwndTree, 0, top_bar_h, tree_w, main_h, TRUE);
+        MoveWindow(g_hwndCode, tree_w, top_bar_h, w - tree_w, main_h, TRUE);
+        MoveWindow(g_hwndLog, 0, top_bar_h + main_h, w, log_h, TRUE);
         return 0;
     }
 
+    case WM_CTLCOLORLISTBOX:
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT: {
         HDC hdc = reinterpret_cast<HDC>(wParam);
@@ -602,6 +534,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         LPNMHDR pnm = reinterpret_cast<LPNMHDR>(lParam);
         if (pnm->idFrom == IDC_TREEVIEW && pnm->code == TVN_SELCHANGEDW) {
             LPNMTREEVIEWW pnmtv = reinterpret_cast<LPNMTREEVIEWW>(lParam);
+            if (pnmtv->itemNew.lParam != 0) {
+                const auto* info = reinterpret_cast<const TreeItemInfo*>(pnmtv->itemNew.lParam);
+                if (info && !info->content.empty()) {
+                    SetWindowTextW(g_hwndCode, normalize_crlf(info->content).c_str());
+                    SetStatusBarText(0, info->title);
+                    if (!info->status_info.empty()) {
+                        SetStatusBarText(1, info->status_info);
+                    }
+                    LogMessage("Selected: " + info->title);
+                    break;
+                }
+            }
             wchar_t text_buf[256] = L"";
             TVITEMW item = {};
             item.hItem = pnmtv->itemNew.hItem;
@@ -705,6 +649,811 @@ void SetupMenus(HWND hwnd) {
 
 }  // namespace
 
+void StudioApp::populate_tree(const core::BinaryView& view) {
+    if (!g_hwndTree) return;
+    tree_items_.clear();
+    SendMessageW(g_hwndTree, TVM_DELETEITEM, 0, reinterpret_cast<LPARAM>(TVI_ROOT));
+
+    std::string filename = current_file_;
+    auto last_slash = filename.find_last_of("\\/");
+    if (last_slash != std::string::npos) filename = filename.substr(last_slash + 1);
+    if (filename.empty()) filename = "Target_Binary";
+
+    // 0. Root Binary Node
+    auto root_info = std::make_unique<TreeItemInfo>();
+    root_info->title = filename;
+    root_info->category = "Root";
+
+    std::ostringstream root_ss;
+    root_ss << "TypeMorph Binary Analysis & Decompiler Studio\n"
+            << "================================================================================\n"
+            << "Target File:       " << current_file_ << "\n"
+            << "File Size:         " << view.size() << " bytes (" << (view.size() / 1024) << " KB)\n";
+
+    auto img_res = core::ExecutableImage::parse(view);
+    if (img_res) {
+        const auto& img = img_res.value();
+        root_ss << "Image Format:      " << core::to_string(img.format()) << " (" << img.bits() << "-bit)\n"
+                << "Image Base:        0x" << std::hex << img.image_base() << "\n"
+                << "Entry Point:       0x" << std::hex << img.entry_point() << std::dec << "\n"
+                << "Sections Count:    " << img.sections().size() << "\n"
+                << "Symbols Count:     " << img.symbols().size() << "\n";
+    }
+
+    if (!detect_result_.primary_compiler.empty() || !detect_result_.primary_packer.empty()) {
+        root_ss << "Compiler Verdict:  " << (detect_result_.primary_compiler.empty() ? "Unknown" : detect_result_.primary_compiler) << "\n"
+                << "Packer / Protector:" << (detect_result_.primary_packer.empty() ? "None" : detect_result_.primary_packer) << "\n";
+    }
+    if (vm_report_.is_virtualized) {
+        root_ss << "Virtual Machine:   " << vm_report_.detected_protector
+                << " (" << vm_report_.total_handlers << " handlers identified)\n";
+    }
+    root_ss << "================================================================================\n\n"
+            << "Select any section, export, subroutine, or VM entry in the tree to inspect details.\n";
+
+    root_info->content = root_ss.str();
+    root_info->status_info = filename + " (" + std::to_string(view.size()) + " B)";
+
+    TVINSERTSTRUCTW tvis = {};
+    tvis.hParent = TVI_ROOT;
+    tvis.hInsertAfter = TVI_LAST;
+    tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+
+    std::wstring wroot_text = to_wide(filename);
+    if (img_res) {
+        wroot_text += L" [" + to_wide(core::to_string(img_res->format())) + L" " + std::to_wstring(img_res->bits()) + L"-bit]";
+    }
+    tvis.item.pszText = const_cast<LPWSTR>(wroot_text.c_str());
+    tvis.item.lParam = reinterpret_cast<LPARAM>(root_info.get());
+    HTREEITEM hRoot = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
+    tree_items_.push_back(std::move(root_info));
+
+    // 1. Native Executable (PE / ELF / Mach-O)
+    if (img_res) {
+        const auto& img = img_res.value();
+        c_report_ = decompile::CDecompiler{}.decompile(img, std::nullopt);
+        abi_report_ = abi::AbiClassifier{}.analyze(img, std::nullopt);
+
+        std::map<std::uint64_t, std::string> decompile_map;
+        for (const auto& f : c_report_.functions) {
+            decompile_map[f.entry_va] = f.pseudocode;
+        }
+
+        // PE Security / Hardening Node
+        auto sec_check_info = std::make_unique<TreeItemInfo>();
+        sec_check_info->title = "Binary Hardening & Security (checksec)";
+        sec_check_info->category = "Security";
+        security::SecurityAnalyzer sec_analyzer;
+        auto sec_rep = sec_analyzer.analyze_view(view);
+        {
+            std::ostringstream ss;
+            char ep_buf[32];
+            std::snprintf(ep_buf, sizeof(ep_buf), "0x%llx", static_cast<unsigned long long>(sec_rep.entry_point));
+            ss << "Binary Hardening & Security Profile (checksec)\n"
+               << "================================================================================\n"
+               << "Target: " << current_file_ << "\n"
+               << "Format: " << core::to_string(sec_rep.format) << " (" << sec_rep.bits << "-bit)\n"
+               << "Entry:  " << ep_buf << (sec_rep.entry_point_outside_code ? " [WARNING: Outside code section!]" : "") << "\n\n"
+               << "Mitigations:\n"
+               << "  ASLR:                  " << (sec_rep.mitigations.aslr ? "Enabled" : "Disabled") << "\n"
+               << "  High-Entropy VA:       " << (sec_rep.mitigations.high_entropy_va ? "Enabled" : "Disabled") << "\n"
+               << "  DEP / NX:              " << (sec_rep.mitigations.dep_nx ? "Enabled" : "Disabled") << "\n"
+               << "  Control Flow Guard:    " << (sec_rep.mitigations.cfg ? "Enabled" : "Disabled") << "\n"
+               << "  CET Shadow Stack:      " << (sec_rep.mitigations.cet_shadow_stack ? "Enabled" : "Disabled") << "\n";
+            if (sec_rep.format == core::ImageFormat::pe) {
+                ss << "  SafeSEH:               " << (sec_rep.mitigations.safe_seh ? "Enabled" : "Disabled / N/A") << "\n"
+                   << "  Authenticode Signed:   " << (sec_rep.mitigations.signed_binary ? "Signed" : "No signature") << "\n"
+                   << "  TLS Callbacks:         " << (sec_rep.has_tls_callbacks ? "Present" : "None") << "\n";
+            }
+            if (!sec_rep.packers.empty()) {
+                ss << "\nPackers Detected:\n";
+                for (const auto& p : sec_rep.packers) {
+                    ss << "  - " << p.name << " (" << (p.confidence * 100.0) << "%): " << p.rationale << "\n";
+                }
+            }
+            sec_check_info->content = ss.str();
+        }
+        sec_check_info->status_info = "checksec: ASLR=" + std::string(sec_rep.mitigations.aslr ? "ON" : "OFF") +
+                                      " DEP=" + std::string(sec_rep.mitigations.dep_nx ? "ON" : "OFF");
+        TVINSERTSTRUCTW ins_sec = {};
+        ins_sec.hParent = hRoot;
+        ins_sec.hInsertAfter = TVI_LAST;
+        ins_sec.item.mask = TVIF_TEXT | TVIF_PARAM;
+        std::wstring wsec_label = L"Security Mitigations (checksec)";
+        ins_sec.item.pszText = const_cast<LPWSTR>(wsec_label.c_str());
+        ins_sec.item.lParam = reinterpret_cast<LPARAM>(sec_check_info.get());
+        SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ins_sec));
+        tree_items_.push_back(std::move(sec_check_info));
+
+        // Sections Node
+        if (!img.sections().empty()) {
+            auto sec_parent_info = std::make_unique<TreeItemInfo>();
+            sec_parent_info->title = "Sections (" + std::to_string(img.sections().size()) + ")";
+            sec_parent_info->category = "Sections";
+            std::ostringstream ss_all_sec;
+            ss_all_sec << "Executable Sections Overview (" << img.sections().size() << " sections)\n"
+                       << "================================================================================\n"
+                       << "Name       Virtual Address     Virtual Size   Raw Offset   Raw Size     Entropy  Flags\n"
+                       << "--------------------------------------------------------------------------------\n";
+            for (const auto& s : img.sections()) {
+                auto sbytes = img.section_bytes(s);
+                double ent = sbytes ? core::shannon_entropy(sbytes.value()) : 0.0;
+                char line[128];
+                std::snprintf(line, sizeof(line), "%-10s 0x%016llx  0x%08llx     0x%08llx   0x%08llx   %5.2f    ",
+                              s.name.empty() ? "(none)" : s.name.c_str(),
+                              static_cast<unsigned long long>(s.virtual_address),
+                              static_cast<unsigned long long>(s.virtual_size),
+                              static_cast<unsigned long long>(s.file_offset),
+                              static_cast<unsigned long long>(s.file_size),
+                              ent);
+                ss_all_sec << line;
+                if (s.executable()) ss_all_sec << "EXEC ";
+                if (s.writable()) ss_all_sec << "WRITE ";
+                if (s.read_only()) ss_all_sec << "READ ";
+                ss_all_sec << "\n";
+            }
+            sec_parent_info->content = ss_all_sec.str();
+            sec_parent_info->status_info = std::to_string(img.sections().size()) + " sections in image";
+
+            TVINSERTSTRUCTW ins_sec_parent = {};
+            ins_sec_parent.hParent = hRoot;
+            ins_sec_parent.hInsertAfter = TVI_LAST;
+            ins_sec_parent.item.mask = TVIF_TEXT | TVIF_PARAM;
+            std::wstring wsec_p = to_wide("Sections (" + std::to_string(img.sections().size()) + ")");
+            ins_sec_parent.item.pszText = const_cast<LPWSTR>(wsec_p.c_str());
+            ins_sec_parent.item.lParam = reinterpret_cast<LPARAM>(sec_parent_info.get());
+            HTREEITEM hSections = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ins_sec_parent)));
+            tree_items_.push_back(std::move(sec_parent_info));
+
+            // Individual Section Child Nodes
+            for (const auto& s : img.sections()) {
+                auto s_info = std::make_unique<TreeItemInfo>();
+                std::string s_name = s.name.empty() ? "(unnamed)" : s.name;
+                s_info->title = "Section " + s_name;
+                s_info->category = "Section";
+                s_info->va = s.virtual_address;
+                s_info->size = static_cast<std::size_t>(s.virtual_size);
+
+                auto sbytes = img.section_bytes(s);
+                double ent = sbytes ? core::shannon_entropy(sbytes.value()) : 0.0;
+
+                std::ostringstream s_detail;
+                s_detail << "Section Header Details: " << s_name << "\n"
+                         << "================================================================================\n"
+                         << "Virtual Address:   0x" << std::hex << s.virtual_address << "\n"
+                         << "Virtual Size:      0x" << s.virtual_size << " (" << std::dec << s.virtual_size << " bytes)\n"
+                         << "Raw File Offset:   0x" << std::hex << s.file_offset << "\n"
+                         << "Raw File Size:     0x" << s.file_size << " (" << std::dec << s.file_size << " bytes)\n"
+                         << "Characteristics:   " << (s.executable() ? "EXECUTABLE " : "")
+                                                << (s.writable() ? "WRITABLE " : "")
+                                                << (s.read_only() ? "READ-ONLY " : "") << "\n"
+                         << "Shannon Entropy:   " << std::fixed << std::setprecision(2) << ent
+                         << " (" << core::entropy_label(ent) << ")\n\n"
+                         << "Hex & ASCII Preview (First 256 bytes):\n"
+                         << "--------------------------------------------------------------------------------\n";
+                if (sbytes && !sbytes.value().empty()) {
+                    s_detail << format_hex_dump(sbytes.value(), s.virtual_address, 256);
+                } else {
+                    s_detail << "  (Section has no raw file data - uninitialized or BSS zero-fill)\n";
+                }
+                s_info->content = s_detail.str();
+                s_info->status_info = s_name + " | VA: 0x" + to_wide_hex(s.virtual_address) + " | Entropy: " + std::to_string(ent).substr(0, 4);
+
+                TVINSERTSTRUCTW s_ins = {};
+                s_ins.hParent = hSections;
+                s_ins.hInsertAfter = TVI_LAST;
+                s_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                std::string s_label = s_name + " [0x" + to_wide_hex(s.virtual_address) + "] (" + std::to_string(s.virtual_size) + " B)";
+                std::wstring ws_label = to_wide(s_label);
+                s_ins.item.pszText = const_cast<LPWSTR>(ws_label.c_str());
+                s_ins.item.lParam = reinterpret_cast<LPARAM>(s_info.get());
+                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&s_ins));
+                tree_items_.push_back(std::move(s_info));
+            }
+        }
+
+        // Subroutines & ABI Functions Node
+        if (!abi_report_.signatures.empty()) {
+            auto subs_parent = std::make_unique<TreeItemInfo>();
+            subs_parent->title = "Subroutines & ABI (" + std::to_string(abi_report_.signatures.size()) + ")";
+            subs_parent->category = "Subroutines";
+            std::ostringstream ss_subs;
+            ss_subs << "Discovered Subroutines & Calling Conventions (" << abi_report_.signatures.size() << " functions)\n"
+                    << "================================================================================\n";
+            for (const auto& sig : abi_report_.signatures) {
+                char line[128];
+                std::snprintf(line, sizeof(line), "  [0x%016llx] %-14s Frame: %3uB  %s\n",
+                              static_cast<unsigned long long>(sig.entry_va),
+                              std::string(to_string(sig.convention)).c_str(),
+                              static_cast<unsigned int>(sig.stack_frame_size),
+                              sig.prototype.c_str());
+                ss_subs << line;
+            }
+            subs_parent->content = ss_subs.str();
+            subs_parent->status_info = std::to_string(abi_report_.signatures.size()) + " subroutines classified";
+
+            TVINSERTSTRUCTW ins_sub_p = {};
+            ins_sub_p.hParent = hRoot;
+            ins_sub_p.hInsertAfter = TVI_LAST;
+            ins_sub_p.item.mask = TVIF_TEXT | TVIF_PARAM;
+            std::wstring wsub_p = to_wide("Subroutines (" + std::to_string(abi_report_.signatures.size()) + ")");
+            ins_sub_p.item.pszText = const_cast<LPWSTR>(wsub_p.c_str());
+            ins_sub_p.item.lParam = reinterpret_cast<LPARAM>(subs_parent.get());
+            HTREEITEM hSubs = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ins_sub_p)));
+            tree_items_.push_back(std::move(subs_parent));
+
+            // Populate individual subroutines
+            std::size_t sub_limit = std::min<std::size_t>(abi_report_.signatures.size(), 150);
+            for (std::size_t i = 0; i < sub_limit; ++i) {
+                const auto& sig = abi_report_.signatures[i];
+                auto fn_info = std::make_unique<TreeItemInfo>();
+                fn_info->title = sig.prototype;
+                fn_info->category = "Subroutine";
+                fn_info->va = sig.entry_va;
+
+                std::ostringstream fn_detail;
+                fn_detail << "Subroutine Details: " << sig.prototype << "\n"
+                          << "================================================================================\n"
+                          << "Entry Point VA:     0x" << std::hex << sig.entry_va << std::dec << "\n"
+                          << "Calling Convention: " << to_string(sig.convention) << "\n"
+                          << "Stack Frame Size:   " << sig.stack_frame_size << " bytes\n"
+                          << "Stack Purge:        " << sig.stack_purge_bytes << " bytes\n"
+                          << "Classification:     " << sig.rationale << "\n\n"
+                          << "Decompiled C Pseudocode:\n"
+                          << "--------------------------------------------------------------------------------\n";
+                auto it_code = decompile_map.find(sig.entry_va);
+                if (it_code != decompile_map.end() && !it_code->second.empty()) {
+                    fn_detail << it_code->second << "\n";
+                } else {
+                    fn_detail << sig.prototype << " {\n"
+                              << "    // High-level pseudocode: frame size " << sig.stack_frame_size << " bytes\n"
+                              << "    // Target convention: " << to_string(sig.convention) << "\n"
+                              << "    return sub_" << std::hex << sig.entry_va << "();\n}\n";
+                }
+                fn_info->content = fn_detail.str();
+                fn_info->status_info = "Function 0x" + to_wide_hex(sig.entry_va) + " [" + std::string(to_string(sig.convention)) + "]";
+
+                TVINSERTSTRUCTW fn_ins = {};
+                fn_ins.hParent = hSubs;
+                fn_ins.hInsertAfter = TVI_LAST;
+                fn_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                std::string fn_lbl = sig.prototype + " [0x" + to_wide_hex(sig.entry_va) + "]";
+                std::wstring wfn_lbl = to_wide(fn_lbl);
+                fn_ins.item.pszText = const_cast<LPWSTR>(wfn_lbl.c_str());
+                fn_ins.item.lParam = reinterpret_cast<LPARAM>(fn_info.get());
+                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&fn_ins));
+                tree_items_.push_back(std::move(fn_info));
+            }
+        }
+
+        // Exports & Symbols Node
+        if (!img.symbols().empty()) {
+            auto sym_parent = std::make_unique<TreeItemInfo>();
+            sym_parent->title = "Export Symbols (" + std::to_string(img.symbols().size()) + ")";
+            sym_parent->category = "Exports";
+            std::ostringstream ss_sym;
+            ss_sym << "Export Symbols Directory (" << img.symbols().size() << " symbols)\n"
+                   << "================================================================================\n";
+            for (const auto& s : img.symbols()) {
+                char line[128];
+                std::snprintf(line, sizeof(line), "  [0x%016llx] (size %4llu)  %s\n",
+                              static_cast<unsigned long long>(s.address),
+                              static_cast<unsigned long long>(s.size),
+                              s.name.c_str());
+                ss_sym << line;
+            }
+            sym_parent->content = ss_sym.str();
+            sym_parent->status_info = std::to_string(img.symbols().size()) + " export symbols";
+
+            TVINSERTSTRUCTW ins_sym_p = {};
+            ins_sym_p.hParent = hRoot;
+            ins_sym_p.hInsertAfter = TVI_LAST;
+            ins_sym_p.item.mask = TVIF_TEXT | TVIF_PARAM;
+            std::wstring wsym_p = to_wide("Exports (" + std::to_string(img.symbols().size()) + ")");
+            ins_sym_p.item.pszText = const_cast<LPWSTR>(wsym_p.c_str());
+            ins_sym_p.item.lParam = reinterpret_cast<LPARAM>(sym_parent.get());
+            HTREEITEM hExports = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ins_sym_p)));
+            tree_items_.push_back(std::move(sym_parent));
+
+            std::size_t sym_limit = std::min<std::size_t>(img.symbols().size(), 100);
+            for (std::size_t i = 0; i < sym_limit; ++i) {
+                const auto& s = img.symbols()[i];
+                auto s_item = std::make_unique<TreeItemInfo>();
+                s_item->title = "Export " + s.name;
+                s_item->category = "Export";
+                s_item->va = s.address;
+                s_item->size = static_cast<std::size_t>(s.size);
+
+                std::ostringstream s_det;
+                s_det << "Exported Symbol: " << s.name << "\n"
+                      << "================================================================================\n"
+                      << "Address: 0x" << std::hex << s.address << "\n"
+                      << "Size:    " << std::dec << s.size << " bytes\n";
+                auto it_code = decompile_map.find(s.address);
+                if (it_code != decompile_map.end()) {
+                    s_det << "\nDecompiled Pseudocode:\n"
+                          << "--------------------------------------------------------------------------------\n"
+                          << it_code->second << "\n";
+                }
+                s_item->content = s_det.str();
+                s_item->status_info = s.name + " [0x" + to_wide_hex(s.address) + "]";
+
+                TVINSERTSTRUCTW exp_ins = {};
+                exp_ins.hParent = hExports;
+                exp_ins.hInsertAfter = TVI_LAST;
+                exp_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                std::string exp_lbl = s.name + " [0x" + to_wide_hex(s.address) + "]";
+                std::wstring wexp_lbl = to_wide(exp_lbl);
+                exp_ins.item.pszText = const_cast<LPWSTR>(wexp_lbl.c_str());
+                exp_ins.item.lParam = reinterpret_cast<LPARAM>(s_item.get());
+                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&exp_ins));
+                tree_items_.push_back(std::move(s_item));
+            }
+        }
+    }
+
+    // 2. VM Architecture & Handlers (VMProtect / Themida)
+    if (vm_report_.is_virtualized) {
+        auto vm_parent = std::make_unique<TreeItemInfo>();
+        vm_parent->title = "VM Virtualization: " + vm_report_.detected_protector;
+        vm_parent->category = "VirtualMachine";
+        vm_parent->content = vm::VmProfiler::format_report(vm_report_);
+        vm_parent->status_info = vm_report_.detected_protector + " (" + std::to_string(vm_report_.total_handlers) + " handlers)";
+
+        TVINSERTSTRUCTW ins_vm = {};
+        ins_vm.hParent = hRoot;
+        ins_vm.hInsertAfter = TVI_LAST;
+        ins_vm.item.mask = TVIF_TEXT | TVIF_PARAM;
+        std::wstring wvm = to_wide("VM Virtualization: " + vm_report_.detected_protector);
+        ins_vm.item.pszText = const_cast<LPWSTR>(wvm.c_str());
+        ins_vm.item.lParam = reinterpret_cast<LPARAM>(vm_parent.get());
+        HTREEITEM hVm = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ins_vm)));
+        tree_items_.push_back(std::move(vm_parent));
+
+        for (std::size_t i = 0; i < vm_report_.vm_entries.size(); ++i) {
+            const auto& e = vm_report_.vm_entries[i];
+            auto entry_info = std::make_unique<TreeItemInfo>();
+            entry_info->title = "VM Entry 0x" + to_wide_hex(e.entry_va);
+            entry_info->category = "VMEntry";
+            entry_info->va = e.entry_va;
+
+            std::ostringstream ess;
+            ess << "VM Entry Point: 0x" << std::hex << e.entry_va << "\n"
+                << "================================================================================\n"
+                << "Dispatcher VA:      0x" << std::hex << e.dispatcher_va << " (" << e.target_vm << ")\n"
+                << "Identified Handlers:" << std::dec << e.identified_handlers.size() << "\n\n"
+                << "Handler Table:\n";
+            for (const auto& h : e.identified_handlers) {
+                ess << "  - " << h.type << " [0x" << std::hex << h.address << "] (" << std::dec << h.size << " bytes)\n";
+            }
+            entry_info->content = ess.str();
+            entry_info->status_info = "VM Entry 0x" + to_wide_hex(e.entry_va) + " (" + std::to_string(e.identified_handlers.size()) + " handlers)";
+
+            std::ostringstream ss;
+            ss << "VM Entry [0x" << std::hex << e.entry_va << "] Handlers (" << std::dec << e.identified_handlers.size() << ")";
+            std::wstring we = to_wide(ss.str());
+            TVINSERTSTRUCTW e_ins = {};
+            e_ins.hParent = hVm;
+            e_ins.hInsertAfter = TVI_LAST;
+            e_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+            e_ins.item.pszText = const_cast<LPWSTR>(we.c_str());
+            e_ins.item.lParam = reinterpret_cast<LPARAM>(entry_info.get());
+            HTREEITEM hEntry = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&e_ins)));
+            tree_items_.push_back(std::move(entry_info));
+
+            for (const auto& h : e.identified_handlers) {
+                auto h_info = std::make_unique<TreeItemInfo>();
+                h_info->title = h.type + " [0x" + to_wide_hex(h.address) + "]";
+                h_info->category = "VMHandler";
+                h_info->va = h.address;
+                h_info->size = h.size;
+
+                std::ostringstream h_det;
+                h_det << "Virtual Machine Handler: " << h.type << "\n"
+                      << "================================================================================\n"
+                      << "Address:     0x" << std::hex << h.address << "\n"
+                      << "Size:        " << std::dec << h.size << " bytes\n"
+                      << "Semantics:   VM Virtual Machine Instruction Dispatch\n";
+                h_info->content = h_det.str();
+                h_info->status_info = h.type + " [0x" + to_wide_hex(h.address) + "]";
+
+                std::ostringstream hss;
+                hss << h.type << " [0x" << std::hex << h.address << "] (" << std::dec << h.size << " B)";
+                std::wstring wh = to_wide(hss.str());
+                TVINSERTSTRUCTW h_ins = {};
+                h_ins.hParent = hEntry;
+                h_ins.hInsertAfter = TVI_LAST;
+                h_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                h_ins.item.pszText = const_cast<LPWSTR>(wh.c_str());
+                h_ins.item.lParam = reinterpret_cast<LPARAM>(h_info.get());
+                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&h_ins));
+                tree_items_.push_back(std::move(h_info));
+            }
+        }
+    }
+
+    // 3. .NET Types & Namespaces
+    if (dotnet_report_.is_dotnet) {
+        std::map<std::string, std::vector<const dotnet::DotNetType*>> by_ns;
+        for (const auto& t : dotnet_report_.types) by_ns[t.namespace_name].push_back(&t);
+
+        for (const auto& [ns, types] : by_ns) {
+            HTREEITEM hNs = hRoot;
+            if (!ns.empty()) {
+                std::wstring wns = to_wide("Namespace: " + ns);
+                TVINSERTSTRUCTW ns_ins = {};
+                ns_ins.hParent = hRoot;
+                ns_ins.hInsertAfter = TVI_LAST;
+                ns_ins.item.mask = TVIF_TEXT;
+                ns_ins.item.pszText = const_cast<LPWSTR>(wns.c_str());
+                hNs = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ns_ins)));
+            }
+
+            for (const auto* t : types) {
+                auto t_info = std::make_unique<TreeItemInfo>();
+                t_info->title = "class " + t->name;
+                t_info->category = "DotNetType";
+
+                std::ostringstream t_ss;
+                t_ss << "// Decompiled .NET Type: " << t->namespace_name << "." << t->name << "\n"
+                     << "public class " << t->name << " {\n";
+                for (const auto& m : t->methods) {
+                    t_ss << "    " << (m.is_public ? "public " : "private ")
+                         << (m.is_static ? "static " : "")
+                         << m.return_type << " " << m.name << "(";
+                    for (std::size_t pi = 0; pi < m.parameters.size(); ++pi) {
+                        if (pi > 0) t_ss << ", ";
+                        t_ss << m.parameters[pi].type_name << " " << m.parameters[pi].name;
+                    }
+                    t_ss << ");\n";
+                }
+                t_ss << "}\n";
+                t_info->content = t_ss.str();
+                t_info->status_info = "class " + t->name + " (" + std::to_string(t->methods.size()) + " methods)";
+
+                std::wstring wtname = to_wide("class " + t->name);
+                TVINSERTSTRUCTW t_ins = {};
+                t_ins.hParent = hNs;
+                t_ins.hInsertAfter = TVI_LAST;
+                t_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                t_ins.item.pszText = const_cast<LPWSTR>(wtname.c_str());
+                t_ins.item.lParam = reinterpret_cast<LPARAM>(t_info.get());
+                HTREEITEM hType = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&t_ins)));
+                tree_items_.push_back(std::move(t_info));
+
+                for (const auto& m : t->methods) {
+                    auto m_info = std::make_unique<TreeItemInfo>();
+                    m_info->title = t->name + "." + m.name + "()";
+                    m_info->category = "DotNetMethod";
+
+                    std::ostringstream m_ss;
+                    char rva_buf[32];
+                    std::snprintf(rva_buf, sizeof(rva_buf), "0x%08X", m.rva);
+                    m_ss << "// Decompiled .NET Method: " << t->name << "." << m.name << "\n"
+                         << "// Method RVA: " << rva_buf << "\n"
+                         << (m.is_public ? "public " : (m.is_private ? "private " : ""))
+                         << (m.is_static ? "static " : "")
+                         << (m.is_virtual ? "virtual " : "")
+                         << m.return_type << " " << m.name << "(";
+                    for (std::size_t pi = 0; pi < m.parameters.size(); ++pi) {
+                        if (pi > 0) m_ss << ", ";
+                        m_ss << m.parameters[pi].type_name << " " << m.parameters[pi].name;
+                    }
+                    m_ss << ") {\n    // Method body at RVA " << rva_buf << "\n}\n";
+                    m_info->content = m_ss.str();
+                    m_info->status_info = m.name + "() : " + m.return_type;
+
+                    std::string mdesc = m.name + "() : " + m.return_type;
+                    std::wstring wmname = to_wide(mdesc);
+                    TVINSERTSTRUCTW m_ins = {};
+                    m_ins.hParent = hType;
+                    m_ins.hInsertAfter = TVI_LAST;
+                    m_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                    m_ins.item.pszText = const_cast<LPWSTR>(wmname.c_str());
+                    m_ins.item.lParam = reinterpret_cast<LPARAM>(m_info.get());
+                    SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&m_ins));
+                    tree_items_.push_back(std::move(m_info));
+                }
+            }
+        }
+    }
+
+    // 4. Delphi VCL Forms & Units
+    if (delphi_report_.is_delphi) {
+        auto delphi_info = std::make_unique<TreeItemInfo>();
+        delphi_info->title = "Delphi VCL Architecture (" + delphi_report_.compiler_version + ")";
+        delphi_info->category = "Delphi";
+        delphi_info->content = delphi::DelphiAnalyzer::to_pascal_source(delphi_report_);
+        delphi_info->status_info = "Delphi " + delphi_report_.compiler_version;
+
+        std::wstring wdelphi = L"Delphi VCL Architecture (" + to_wide(delphi_report_.compiler_version) + L")";
+        TVINSERTSTRUCTW d_ins = {};
+        d_ins.hParent = hRoot;
+        d_ins.hInsertAfter = TVI_LAST;
+        d_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        d_ins.item.pszText = const_cast<LPWSTR>(wdelphi.c_str());
+        d_ins.item.lParam = reinterpret_cast<LPARAM>(delphi_info.get());
+        HTREEITEM hDelphi = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&d_ins)));
+        tree_items_.push_back(std::move(delphi_info));
+
+        for (const auto& form : delphi_report_.forms) {
+            auto form_info = std::make_unique<TreeItemInfo>();
+            form_info->title = "Form: " + form.form_name;
+            form_info->category = "DelphiForm";
+            std::ostringstream f_ss;
+            f_ss << "type\n  " << form.class_name << " = class(TForm)\n";
+            for (const auto& ev : form.root_component.events) {
+                f_ss << "    procedure " << ev.handler_name << "(Sender: TObject);\n";
+            }
+            f_ss << "  end;\n";
+            form_info->content = f_ss.str();
+            form_info->status_info = form.form_name + " (" + form.class_name + ")";
+
+            std::wstring wform = to_wide("Form: " + form.form_name + " (" + form.class_name + ")");
+            TVINSERTSTRUCTW form_ins = {};
+            form_ins.hParent = hDelphi;
+            form_ins.hInsertAfter = TVI_LAST;
+            form_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+            form_ins.item.pszText = const_cast<LPWSTR>(wform.c_str());
+            form_ins.item.lParam = reinterpret_cast<LPARAM>(form_info.get());
+            HTREEITEM hForm = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&form_ins)));
+            tree_items_.push_back(std::move(form_info));
+
+            for (const auto& ev : form.root_component.events) {
+                auto ev_info = std::make_unique<TreeItemInfo>();
+                ev_info->title = ev.event_name + " -> " + ev.handler_name;
+                ev_info->category = "DelphiEvent";
+                ev_info->va = ev.handler_va;
+
+                std::ostringstream ev_ss;
+                ev_ss << "procedure " << form.class_name << "." << ev.handler_name << "(Sender: TObject);\n"
+                      << "begin\n  // Event: " << ev.event_name << "\n  // Handler VA: 0x" << std::hex << ev.handler_va << "\nend;\n";
+                ev_info->content = ev_ss.str();
+                ev_info->status_info = ev.handler_name + " [0x" + to_wide_hex(ev.handler_va) + "]";
+
+                std::ostringstream ss;
+                ss << ev.event_name << " -> " << ev.handler_name << " [VA: 0x" << std::hex << ev.handler_va << "]";
+                std::wstring wev = to_wide(ss.str());
+                TVINSERTSTRUCTW ev_ins = {};
+                ev_ins.hParent = hForm;
+                ev_ins.hInsertAfter = TVI_LAST;
+                ev_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                ev_ins.item.pszText = const_cast<LPWSTR>(wev.c_str());
+                ev_ins.item.lParam = reinterpret_cast<LPARAM>(ev_info.get());
+                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ev_ins));
+                tree_items_.push_back(std::move(ev_info));
+            }
+        }
+    }
+
+    // 5. Android Dalvik DEX Classes
+    if (dex_report_.is_dex) {
+        auto dex_info = std::make_unique<TreeItemInfo>();
+        dex_info->title = "Dalvik DEX (" + std::to_string(dex_report_.classes.size()) + " classes)";
+        dex_info->category = "DEX";
+        dex_info->content = dex::DexAnalyzer::to_java_source(dex_report_);
+        dex_info->status_info = "Dalvik DEX v" + dex_report_.version;
+
+        std::wstring wdex = L"Dalvik DEX Packages (" + std::to_wstring(dex_report_.classes.size()) + L" classes)";
+        TVINSERTSTRUCTW dex_ins = {};
+        dex_ins.hParent = hRoot;
+        dex_ins.hInsertAfter = TVI_LAST;
+        dex_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        dex_ins.item.pszText = const_cast<LPWSTR>(wdex.c_str());
+        dex_ins.item.lParam = reinterpret_cast<LPARAM>(dex_info.get());
+        HTREEITEM hDex = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&dex_ins)));
+        tree_items_.push_back(std::move(dex_info));
+
+        for (const auto& cls : dex_report_.classes) {
+            auto cls_info = std::make_unique<TreeItemInfo>();
+            cls_info->title = "class " + cls.name;
+            cls_info->category = "DexClass";
+            cls_info->content = "// Dalvik class " + cls.name + "\npublic class " + cls.name + " {\n}\n";
+            cls_info->status_info = cls.name + " (" + std::to_string(cls.methods.size()) + " methods)";
+
+            std::wstring wcls = to_wide(cls.name);
+            TVINSERTSTRUCTW c_ins = {};
+            c_ins.hParent = hDex;
+            c_ins.hInsertAfter = TVI_LAST;
+            c_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+            c_ins.item.pszText = const_cast<LPWSTR>(wcls.c_str());
+            c_ins.item.lParam = reinterpret_cast<LPARAM>(cls_info.get());
+            HTREEITEM hC = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&c_ins)));
+            tree_items_.push_back(std::move(cls_info));
+
+            for (const auto& m : cls.methods) {
+                auto m_info = std::make_unique<TreeItemInfo>();
+                m_info->title = cls.name + "." + m.name;
+                m_info->category = "DexMethod";
+
+                std::ostringstream dm_ss;
+                dm_ss << "// Method: " << cls.name << "." << m.name << "\n";
+                if (!m.decompiled_java.empty()) {
+                    dm_ss << m.decompiled_java << "\n";
+                } else {
+                    dm_ss << "public " << m.return_type << " " << m.name << "() {\n";
+                    for (const auto& insn : m.instructions) {
+                        dm_ss << "    " << insn << "\n";
+                    }
+                    dm_ss << "}\n";
+                }
+                m_info->content = dm_ss.str();
+                m_info->status_info = m.name + " (" + std::to_string(m.instructions.size()) + " insns)";
+
+                std::wstring wm = to_wide(m.name + " (" + std::to_string(m.instructions.size()) + " insns)");
+                TVINSERTSTRUCTW m_ins = {};
+                m_ins.hParent = hC;
+                m_ins.hInsertAfter = TVI_LAST;
+                m_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                m_ins.item.pszText = const_cast<LPWSTR>(wm.c_str());
+                m_ins.item.lParam = reinterpret_cast<LPARAM>(m_info.get());
+                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&m_ins));
+                tree_items_.push_back(std::move(m_info));
+            }
+        }
+    }
+
+    // 6. Visual Basic 5/6 Forms & Events
+    if (vb_report_.is_vb) {
+        auto vb_info = std::make_unique<TreeItemInfo>();
+        vb_info->title = "VB6 Project";
+        vb_info->category = "VB6";
+        vb_info->content = vb::VbAnalyzer::to_vb_source(vb_report_);
+        vb_info->status_info = vb_report_.is_pcode ? "VB6 P-Code" : "VB6 Native";
+
+        std::string mode_str = vb_report_.is_pcode ? "P-Code" : "Native Code";
+        std::wstring wvb = to_wide("VB6 Project (" + mode_str + ")");
+        TVINSERTSTRUCTW vb_ins = {};
+        vb_ins.hParent = hRoot;
+        vb_ins.hInsertAfter = TVI_LAST;
+        vb_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        vb_ins.item.pszText = const_cast<LPWSTR>(wvb.c_str());
+        vb_ins.item.lParam = reinterpret_cast<LPARAM>(vb_info.get());
+        HTREEITEM hVb = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&vb_ins)));
+        tree_items_.push_back(std::move(vb_info));
+
+        for (const auto& mod : vb_report_.modules) {
+            auto mod_info = std::make_unique<TreeItemInfo>();
+            mod_info->title = mod.name;
+            mod_info->category = "VBModule";
+            mod_info->content = "' VB Module: " + mod.name + " (" + mod.kind + ")\n";
+            mod_info->status_info = mod.name;
+
+            std::wstring wmod = to_wide(mod.kind + ": " + mod.name);
+            TVINSERTSTRUCTW mod_ins = {};
+            mod_ins.hParent = hVb;
+            mod_ins.hInsertAfter = TVI_LAST;
+            mod_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+            mod_ins.item.pszText = const_cast<LPWSTR>(wmod.c_str());
+            mod_ins.item.lParam = reinterpret_cast<LPARAM>(mod_info.get());
+            HTREEITEM hMod = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&mod_ins)));
+            tree_items_.push_back(std::move(mod_info));
+
+            for (const auto& ev : mod.events) {
+                auto ev_info = std::make_unique<TreeItemInfo>();
+                ev_info->title = ev.object_name + "_" + ev.event_name;
+                ev_info->category = "VBEvent";
+                ev_info->va = ev.code_va;
+                ev_info->content = "Private Sub " + ev.object_name + "_" + ev.event_name + "()\n    ' Event handler VA: 0x" + to_wide_hex(ev.code_va) + "\nEnd Sub\n";
+                ev_info->status_info = ev.object_name + "_" + ev.event_name + " [0x" + to_wide_hex(ev.code_va) + "]";
+
+                std::ostringstream ss;
+                ss << ev.object_name << "_" << ev.event_name << " [VA: 0x" << std::hex << ev.code_va << "]";
+                std::wstring wev = to_wide(ss.str());
+                TVINSERTSTRUCTW ev_ins = {};
+                ev_ins.hParent = hMod;
+                ev_ins.hInsertAfter = TVI_LAST;
+                ev_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+                ev_ins.item.pszText = const_cast<LPWSTR>(wev.c_str());
+                ev_ins.item.lParam = reinterpret_cast<LPARAM>(ev_info.get());
+                SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&ev_ins));
+                tree_items_.push_back(std::move(ev_info));
+            }
+        }
+    }
+
+    // 7. Go Runtime & pclntab
+    if (go_report_.detected) {
+        auto go_info = std::make_unique<TreeItemInfo>();
+        go_info->title = "Go Runtime";
+        go_info->category = "Go";
+        go_info->content = go_report_.golang_source.empty() ? golang::GoAnalyzer::to_golang_source(go_report_) : go_report_.golang_source;
+        go_info->status_info = "Go " + std::string(golang::to_string(go_report_.version));
+
+        std::wstring wgo = to_wide("Go Runtime (" + std::string(golang::to_string(go_report_.version)) + ")");
+        TVINSERTSTRUCTW go_ins = {};
+        go_ins.hParent = hRoot;
+        go_ins.hInsertAfter = TVI_LAST;
+        go_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        go_ins.item.pszText = const_cast<LPWSTR>(wgo.c_str());
+        go_ins.item.lParam = reinterpret_cast<LPARAM>(go_info.get());
+        HTREEITEM hGo = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&go_ins)));
+        tree_items_.push_back(std::move(go_info));
+
+        for (const auto& s : go_report_.structs) {
+            auto s_info = std::make_unique<TreeItemInfo>();
+            s_info->title = "type " + s.name + " struct";
+            s_info->category = "GoStruct";
+            std::ostringstream s_ss;
+            s_ss << "type " << s.name << " struct {\n";
+            for (const auto& f : s.fields) {
+                s_ss << "    " << f.name << " " << f.type_name << "\n";
+            }
+            s_ss << "}\n";
+            s_info->content = s_ss.str();
+            s_info->status_info = "struct " + s.name;
+
+            std::wstring ws = to_wide("type " + s.name + " struct");
+            TVINSERTSTRUCTW s_ins = {};
+            s_ins.hParent = hGo;
+            s_ins.hInsertAfter = TVI_LAST;
+            s_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+            s_ins.item.pszText = const_cast<LPWSTR>(ws.c_str());
+            s_ins.item.lParam = reinterpret_cast<LPARAM>(s_info.get());
+            SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&s_ins));
+            tree_items_.push_back(std::move(s_info));
+        }
+
+        for (std::size_t i = 0; i < std::min<std::size_t>(go_report_.functions.size(), 50); ++i) {
+            const auto& fn = go_report_.functions[i];
+            auto f_info = std::make_unique<TreeItemInfo>();
+            f_info->title = "func " + fn.name;
+            f_info->category = "GoFunc";
+            f_info->va = fn.entry_va;
+            f_info->content = "func " + fn.name + "() {\n    // VA: 0x" + to_wide_hex(fn.entry_va) + "\n}\n";
+            f_info->status_info = fn.name + " [0x" + to_wide_hex(fn.entry_va) + "]";
+
+            std::wstring wf = to_wide("func " + fn.name);
+            TVINSERTSTRUCTW f_ins = {};
+            f_ins.hParent = hGo;
+            f_ins.hInsertAfter = TVI_LAST;
+            f_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+            f_ins.item.pszText = const_cast<LPWSTR>(wf.c_str());
+            f_ins.item.lParam = reinterpret_cast<LPARAM>(f_info.get());
+            SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&f_ins));
+            tree_items_.push_back(std::move(f_info));
+        }
+    }
+
+    // 8. Lua Bytecode Functions
+    if (lua_report_.is_lua_bytecode) {
+        auto lua_info = std::make_unique<TreeItemInfo>();
+        lua_info->title = "Lua Bytecode";
+        lua_info->category = "Lua";
+        lua_info->content = lua_report_.lua_source.empty() ? lua::LuaDecompiler::to_lua_source(lua_report_) : lua_report_.lua_source;
+        lua_info->status_info = "Lua " + std::string(lua::to_string(lua_report_.flavor));
+
+        std::wstring wlua = to_wide("Lua Bytecode (" + std::string(lua::to_string(lua_report_.flavor)) + ")");
+        TVINSERTSTRUCTW lua_ins = {};
+        lua_ins.hParent = hRoot;
+        lua_ins.hInsertAfter = TVI_LAST;
+        lua_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        lua_ins.item.pszText = const_cast<LPWSTR>(wlua.c_str());
+        lua_ins.item.lParam = reinterpret_cast<LPARAM>(lua_info.get());
+        HTREEITEM hLua = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&lua_ins)));
+        tree_items_.push_back(std::move(lua_info));
+
+        auto r_info = std::make_unique<TreeItemInfo>();
+        r_info->title = "main (root chunk)";
+        r_info->category = "LuaChunk";
+        r_info->content = lua::LuaDecompiler::to_lua_source(lua_report_);
+        r_info->status_info = "main root chunk (" + std::to_string(lua_report_.root_function.instructions.size()) + " insns)";
+
+        std::wstring wr = to_wide("main (root chunk) [" + std::to_string(lua_report_.root_function.instructions.size()) + " insns]");
+        TVINSERTSTRUCTW r_ins = {};
+        r_ins.hParent = hLua;
+        r_ins.hInsertAfter = TVI_LAST;
+        r_ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        r_ins.item.pszText = const_cast<LPWSTR>(wr.c_str());
+        r_ins.item.lParam = reinterpret_cast<LPARAM>(r_info.get());
+        SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&r_ins));
+        tree_items_.push_back(std::move(r_info));
+    }
+
+    SendMessageW(g_hwndTree, TVM_EXPAND, TVE_EXPAND, reinterpret_cast<LPARAM>(hRoot));
+    SendMessageW(g_hwndTree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(hRoot));
+}
+
 void StudioApp::open_file(const std::string& path) {
     current_file_ = path;
     is_deobfuscated_ = false;
@@ -730,16 +1479,19 @@ void StudioApp::open_file(const std::string& path) {
     unpack_target_ = unpack::UniversalUnpacker::detect(v);
     vm_report_     = vm::VmProfiler::analyze(v);
 
-    golang::GoAnalyzer go_an;
-    auto img_res_go = core::ExecutableImage::parse(v);
-    go_report_ = img_res_go ? go_an.analyze(img_res_go.value()) : go_an.analyze_view(v);
+    detect::DetectorEngine engine;
+    auto img_res_det = core::ExecutableImage::parse(v);
+    detect_result_ = img_res_det ? engine.detect(img_res_det.value()) : engine.detect_view(v);
 
-    // 2. Identify primary engine
+    golang::GoAnalyzer go_an;
+    go_report_ = img_res_det ? go_an.analyze(img_res_det.value()) : go_an.analyze_view(v);
+
+    // 2. Populate complete navigation tree & decompilers
+    populate_tree(v);
+
     std::string filename = path;
     auto last_slash = filename.find_last_of("\\/");
     if (last_slash != std::string::npos) filename = filename.substr(last_slash + 1);
-
-    PopulateTree(filename, dotnet_report_, delphi_report_, dex_report_, vb_report_, vm_report_, go_report_, lua_report_);
 
     if (dotnet_report_.is_dotnet) {
         dotnet_report_.csharp_source = dotnet::DotNetAnalyzer::to_csharp(dotnet_report_);
@@ -771,15 +1523,23 @@ void StudioApp::open_file(const std::string& path) {
         set_mode(DecompilerMode::go_source);
         SetStatusBarText(1, "Go Runtime: " + std::string(golang::to_string(go_report_.version)));
         SetStatusBarText(2, "Functions: " + std::to_string(go_report_.functions.size()));
+    } else if (vm_report_.is_virtualized) {
+        set_mode(DecompilerMode::vm_profile);
+        SetStatusBarText(1, "Virtual Machine: " + vm_report_.detected_protector);
+        SetStatusBarText(2, "Handlers: " + std::to_string(vm_report_.total_handlers));
     } else {
         // Native PE / ELF / Mach-O binary -> Native C pseudocode
         set_mode(DecompilerMode::c_source);
-        SetStatusBarText(1, "Native Binary");
+        SetStatusBarText(1, "Native Binary: " + (img_res_det ? img_res_det->format_name() : "Raw"));
         SetStatusBarText(2, "Size: " + std::to_string(v.size()) + " B");
     }
 
     SetStatusBarText(0, "Loaded: " + filename);
     LogMessage("[TypeMorph] Successfully loaded: " + filename);
+    if (!detect_result_.primary_compiler.empty()) {
+        LogMessage("[DetectItEasy] Identified: " + detect_result_.primary_compiler +
+                   (!detect_result_.primary_packer.empty() && detect_result_.primary_packer != "None (Not packed)" ? (" [" + detect_result_.primary_packer + "]") : ""));
+    }
 }
 
 void StudioApp::set_mode(DecompilerMode mode) {

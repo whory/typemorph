@@ -40,6 +40,7 @@
 #include "typemorph/security/security_analyzer.hpp"
 #include "typemorph/abi/calling_convention.hpp"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,15 @@ enum class DecompilerMode {
     unpack_summary,
     vfs_summary,
     raw_disasm
+};
+
+struct TreeItemInfo {
+    std::string title;
+    std::string category;
+    std::uint64_t va = 0;
+    std::size_t size = 0;
+    std::string content;
+    std::string status_info;
 };
 
 class StudioApp {
@@ -103,6 +113,8 @@ public:
     void run_applycalletype();
     void save_decompiled_output();
 
+    void populate_tree(const core::BinaryView& view);
+
 private:
     std::string current_file_;
     DecompilerMode mode_ = DecompilerMode::csharp;
@@ -119,6 +131,10 @@ private:
     unpack::UnpackTarget unpack_target_;
     vm::VmProfileReport vm_report_;
     detect::DetectionReport detect_result_;
+    decompile::DecompileReport c_report_;
+    abi::AbiReport abi_report_;
+
+    std::vector<std::unique_ptr<TreeItemInfo>> tree_items_;
 
     bool is_deobfuscated_ = false;
 };
@@ -129,3 +145,4 @@ int run_native_studio(int argc, char** argv);
 }  // namespace typemorph::gui
 
 #endif  // _WIN32
+

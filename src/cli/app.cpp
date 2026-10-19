@@ -5234,11 +5234,38 @@ int Application::run(const std::vector<std::string>& args) {
 
 int Application::run(std::span<const std::string_view> args) {
     if (args.empty()) {
+#ifdef _WIN32
+        gui::StudioApp app;
+        return app.run("");
+#else
         out_ << command_help("");
         return 0;
+#endif
     }
     const std::string command(args.front());
     const auto rest = args.subspan(1);
+
+#ifdef _WIN32
+    // If launched with a file directly (e.g. Explorer double click / drag & drop)
+    if (args.size() == 1 &&
+        command != "help" && command != "--help" && command != "-h" &&
+        command != "version" && command != "--version" &&
+        command != "tui" && command != "serve" && command != "gui" && command != "studio" &&
+        command != "infer" && command != "inspect" && command != "rust" && command != "hybrid" &&
+        command != "diff" && command != "emit" && command != "go" && command != "rich" &&
+        command != "abi" && command != "rtti" && command != "checksec" && command != "dotnet" &&
+        command != "lua" && command != "decompile" && command != "derust" && command != "detect" &&
+        command != "iatfix" && command != "delphi" && command != "dex" && command != "vb" &&
+        command != "autoit" && command != "vfs-extract" && command != "spoondec" && command != "evbunpack" &&
+        command != "vmslayer" && command != "novmp" && command != "magicmida" && command != "unpack" &&
+        command != "unipacker" && command != "upx-fix" && command != "memdump" && command != "vmpdump" && command != "fixdump") {
+        std::error_code ec;
+        if (std::filesystem::exists(command, ec)) {
+            gui::StudioApp app;
+            return app.run(command);
+        }
+    }
+#endif
 
     if (command == "help" || command == "--help" || command == "-h") {
         if (!rest.empty()) {
