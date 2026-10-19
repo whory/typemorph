@@ -126,6 +126,17 @@ Confidence is a product of independent evidence; the CLI's
    - Packer & protector signatures: UPX, ASPack, PECompact, VMProtect, Themida, Enigma, PyInstaller.
    - Overlay inspection: detects trailing bytes beyond the last physical section, calculates size, offset, and Shannon entropy.
    - Anti-analysis heuristics: PEB `BeingDebugged` checks (`fs:[0x30]`, `gs:[0x60]`), timing checks (`RDTSC`/`RDTSCP`), and TLS callbacks.
+13. **Golang pclntab & Metadata Reconstructor (`typemorph::golang::GoAnalyzer`)**:
+   - Scans `.gopclntab` and executable sections for Go magic (`0xFFFFFFFB` [Go 1.2-1.15], `0xFFFFFFFA` [Go 1.16-1.17], `0xFFFFFFF0`/`0xFFFFFFF1` [Go 1.18-1.23+]).
+   - Reconstructs function names, entry points, frame sizes, and separates user packages from runtime packages (`typemorph go`).
+14. **MSVC Rich Header & Compiler Fingerprinting (`typemorph::pe::RichHeaderParser`)**:
+   - Decodes XOR-encrypted `@comp.id` telemetry records from the PE DOS stub.
+   - Resolves Tool IDs (Utc1900_C, Utc1900_CPP, Linker, Cvtres, Masm) and build numbers to Visual Studio versions (VS 2003 through VS 2026).
+   - Computes RichPE telemetry hash and verifies XOR checksum (`typemorph rich`).
+15. **Calling Convention & Function Signature Classifier (`typemorph::abi::AbiClassifier`)**:
+   - Disassembles function prologues and epilogues across x86 and x64 architectures.
+   - Analyzes register read-before-write access and stack purge bytes (`ret N` vs `ret`) to classify calling conventions (`__cdecl`, `__stdcall`, `__fastcall`, `__thiscall`, `__win64`, `__sysv`).
+   - Detects stack frame allocations and return kinds (integer, pointer, boolean, float, double), synthesizing complete C/C++ prototypes (`typemorph abi`).
 
 ## Emitters
 
@@ -141,11 +152,11 @@ Confidence is a product of independent evidence; the CLI's
 - **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binary Ninja API v3/v4 plugin)
 - **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
 - Connects either standalone or through `typemorph serve --stdio` JSON-RPC.
-- Automatically renames subroutines from demangled Rust symbols, populates structure definitions for Rust trait vtables, adds comments for string slice pairs and stack strings, labels VM dispatcher handlers, marks cryptographic constants, maps CFF state dispatchers, annotates resolved API hashes and opaque predicates, labels C++ RTTI vftables and methods, and posts security hardening reports.
+- Automatically renames subroutines from demangled Rust symbols, populates structure definitions for Rust trait vtables, adds comments for string slice pairs and stack strings, labels VM dispatcher handlers, marks cryptographic constants, maps CFF state dispatchers, annotates resolved API hashes and opaque predicates, labels C++ RTTI vftables and methods, posts security hardening reports, sets Go function labels, and applies classified calling conventions.
 
 ## CLI / JSON-RPC
 
-`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `apihash`, `opaque`, `rtti`, `checksec`, `entropy`, `sig`, `crypto`, `diff`, `serve`), builds engine options, and
+`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `cff`, `apihash`, `opaque`, `rtti`, `checksec`, `go`, `rich`, `abi`, `entropy`, `sig`, `crypto`, `diff`, `serve`), builds engine options, and
 delegates to `KaitaiEmitter`/`RustEmitter`/etc. `serve --stdio` performs line-delimited
 JSON-RPC 2.0 using the same helpers, so protocol and CLI behavior cannot drift.
 JSON is produced by the built-in `JsonValue` writer (or nlohmann/json when

@@ -277,6 +277,51 @@ class R2Sync:
                 cmt += f" | Packers: {', '.join(p.get('name') for p in packers)}"
             self.cmd(f'CC "{cmt}" @ {ep}')
 
+    def sync_go(self) -> None:
+        print(f"[TypeMorph R2] Reconstructing Golang metadata in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "go", self.target_path)
+        if not data or not data.get("detected"):
+            return
+        fns = data.get("functions", [])
+        print(f"[TypeMorph R2] Found {len(fns)} Go function(s) ({data.get('version')})...")
+        for fn in fns:
+            name = fn.get("name", "")
+            va = fn.get("entry_va", 0)
+            if va and name:
+                sanitized = name.replace(" ", "_").replace("·", "_").replace(".", "__")
+                self.cmd(f"f go.{sanitized} = {va}")
+                self.cmd(f'CC "[TypeMorph Go] {name}" @ {va}')
+
+    def sync_rich(self) -> None:
+        print(f"[TypeMorph R2] Decoding MSVC Rich Header in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "rich", self.target_path)
+        if not data or not data.get("present"):
+            return
+        recs = data.get("records", [])
+        hash_val = data.get("hash", "")
+        vs_versions = data.get("compiler_versions", [])
+        print(f"[TypeMorph R2] Rich Header: Hash {hash_val}, Toolsets: {', '.join(vs_versions)}...")
+        off = data.get("offset", 0x80)
+        cmt = f"[TypeMorph Rich Header] Hash: {hash_val} | Toolsets: {', '.join(vs_versions)}"
+        self.cmd(f'CC "{cmt}" @ {off}')
+
+    def sync_abi(self) -> None:
+        print(f"[TypeMorph R2] Classifying calling conventions in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "abi", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        dist = data.get("conventions", {})
+        print(f"[TypeMorph R2] Analyzed {len(sigs)} function(s). Conventions: {dist}...")
+        for s in sigs:
+            va = s.get("entry_va", 0)
+            proto = s.get("prototype", "")
+            conv = s.get("convention", "")
+            rat = s.get("rationale", "")
+            if va:
+                safe_proto = proto.replace('"', '\\"')
+                self.cmd(f'CC "[TypeMorph ABI] {safe_proto} ({conv})" @ {va}')
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -287,6 +332,9 @@ class R2Sync:
         self.sync_opaque()
         self.sync_rtti()
         self.sync_checksec()
+        self.sync_go()
+        self.sync_rich()
+        self.sync_abi()
         print("[TypeMorph R2] Synchronization complete!")
 
 

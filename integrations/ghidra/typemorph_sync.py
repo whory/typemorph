@@ -358,6 +358,71 @@ class GhidraSync:
                     cmt += f"  Anti-Analysis: {', '.join(anti)}\n"
                 setPlateComment(ep_addr, cmt)
 
+    def sync_go(self) -> None:
+        """Reconstructs Golang functions, packages, and pclntab symbols in Ghidra."""
+        print(f"[TypeMorph Ghidra] Reconstructing Golang metadata in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "go", self.target_path)
+        if not data or not data.get("detected"):
+            return
+        fns = data.get("functions", [])
+        print(f"[TypeMorph Ghidra] Found {len(fns)} Go function(s) ({data.get('version')})")
+        if IN_GHIDRA:
+            for fn in fns:
+                name = fn.get("name", "")
+                va = fn.get("entry_va", 0)
+                if va and name:
+                    addr = toAddr(va)
+                    sanitized = name.replace(" ", "_").replace("·", "_").replace(".", "__")
+                    createLabel(addr, f"go__{sanitized}", False, SourceType.USER_DEFINED)
+                    setPreComment(addr, f"[TypeMorph Go] {name}")
+
+    def sync_rich(self) -> None:
+        """Extracts MSVC Rich Header compiler telemetry and build fingerprints in Ghidra."""
+        print(f"[TypeMorph Ghidra] Decoding MSVC Rich Header in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "rich", self.target_path)
+        if not data or not data.get("present"):
+            return
+        recs = data.get("records", [])
+        hash_val = data.get("hash", "")
+        vs_versions = data.get("compiler_versions", [])
+        print(f"[TypeMorph Ghidra] Rich Header: Hash {hash_val}, Toolsets: {', '.join(vs_versions)}")
+        if IN_GHIDRA:
+            off = data.get("offset", 0x80)
+            addr = toAddr(currentProgram.getImageBase().getOffset() + off)
+            cmt = f"[TypeMorph MSVC Rich Header]\n  Hash: {hash_val}\n  Toolsets: {', '.join(vs_versions)}\n"
+            for r in recs[:8]:
+                cmt += f"  {r.get('tool_name')} (Build {r.get('build_number')}): {r.get('count')} objects [{r.get('vs_version')}]\n"
+            setPlateComment(addr, cmt)
+
+    def sync_abi(self) -> None:
+        """Classifies function calling conventions and sets function prototypes in Ghidra."""
+        print(f"[TypeMorph Ghidra] Classifying calling conventions in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "abi", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        dist = data.get("conventions", {})
+        print(f"[TypeMorph Ghidra] Analyzed {len(sigs)} function(s). Conventions: {dist}")
+        if IN_GHIDRA:
+            listing = currentProgram.getListing()
+            for s in sigs:
+                va = s.get("entry_va", 0)
+                proto = s.get("prototype", "")
+                conv = s.get("convention", "")
+                rat = s.get("rationale", "")
+                if va:
+                    addr = toAddr(va)
+                    fn = listing.getFunctionAt(addr)
+                    if fn:
+                        setPlateComment(addr, f"[TypeMorph ABI]\nPrototype: {proto}\nConvention: {conv}\nRationale: {rat}")
+                        try:
+                            if conv in ("__stdcall", "__cdecl", "__fastcall", "__thiscall"):
+                                fn.setCallingConvention(conv.replace("__", ""))
+                        except Exception:
+                            pass
+                    else:
+                        setPreComment(addr, f"[TypeMorph ABI] {proto} ({conv})")
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -368,6 +433,9 @@ class GhidraSync:
         self.sync_opaque()
         self.sync_rtti()
         self.sync_checksec()
+        self.sync_go()
+        self.sync_rich()
+        self.sync_abi()
         print("[TypeMorph Ghidra] Synchronization complete!")
 
 

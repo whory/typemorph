@@ -329,6 +329,60 @@ class BinaryNinjaSync:
                     cmt += f"  Anti-Analysis: {', '.join(anti)}\n"
                 self.bv.set_comment_at(ep, cmt)
 
+    def sync_go(self) -> None:
+        """Reconstructs Golang functions, packages, and pclntab symbols in Binary Ninja."""
+        print(f"[TypeMorph Binja] Reconstructing Golang metadata in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "go", self.target_path)
+        if not data or not data.get("detected"):
+            return
+        fns = data.get("functions", [])
+        print(f"[TypeMorph Binja] Found {len(fns)} Go function(s) ({data.get('version')})")
+        if self.bv:
+            for fn in fns:
+                name = fn.get("name", "")
+                va = fn.get("entry_va", 0)
+                if va and name:
+                    sanitized = name.replace(" ", "_").replace("·", "_").replace(".", "__")
+                    sym = Symbol(SymbolType.FunctionSymbol, va, f"go__{sanitized}")
+                    self.bv.define_auto_symbol(sym)
+                    self.bv.set_comment_at(va, f"[TypeMorph Go] {name}")
+
+    def sync_rich(self) -> None:
+        """Extracts MSVC Rich Header compiler telemetry and build fingerprints in Binary Ninja."""
+        print(f"[TypeMorph Binja] Decoding MSVC Rich Header in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "rich", self.target_path)
+        if not data or not data.get("present"):
+            return
+        recs = data.get("records", [])
+        hash_val = data.get("hash", "")
+        vs_versions = data.get("compiler_versions", [])
+        print(f"[TypeMorph Binja] Rich Header: Hash {hash_val}, Toolsets: {', '.join(vs_versions)}")
+        if self.bv:
+            off = data.get("offset", 0x80)
+            addr = self.bv.start + off
+            cmt = f"[TypeMorph MSVC Rich Header]\n  Hash: {hash_val}\n  Toolsets: {', '.join(vs_versions)}\n"
+            for r in recs[:8]:
+                cmt += f"  {r.get('tool_name')} (Build {r.get('build_number')}): {r.get('count')} objects [{r.get('vs_version')}]\n"
+            self.bv.set_comment_at(addr, cmt)
+
+    def sync_abi(self) -> None:
+        """Classifies function calling conventions and sets function prototypes in Binary Ninja."""
+        print(f"[TypeMorph Binja] Classifying calling conventions in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "abi", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        dist = data.get("conventions", {})
+        print(f"[TypeMorph Binja] Analyzed {len(sigs)} function(s). Conventions: {dist}")
+        if self.bv:
+            for s in sigs:
+                va = s.get("entry_va", 0)
+                proto = s.get("prototype", "")
+                conv = s.get("convention", "")
+                rat = s.get("rationale", "")
+                if va:
+                    self.bv.set_comment_at(va, f"[TypeMorph ABI] {proto}\nConvention: {conv} ({rat})")
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -339,6 +393,9 @@ class BinaryNinjaSync:
         self.sync_opaque()
         self.sync_rtti()
         self.sync_checksec()
+        self.sync_go()
+        self.sync_rich()
+        self.sync_abi()
         print("[TypeMorph Binja] Synchronization complete!")
 
 
@@ -348,7 +405,7 @@ def binja_sync_all(bv):
 
 
 if IN_BINJA:
-    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt, Crypto, CFF, API Hash, Opaque, RTTI, Checksec)", "Run full TypeMorph analysis", binja_sync_all)
+    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt, Crypto, CFF, API Hash, Opaque, RTTI, Checksec, Go, Rich, ABI)", "Run full TypeMorph analysis", binja_sync_all)
 
 
 def main():

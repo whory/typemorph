@@ -34,6 +34,9 @@ Ghidra/IDA/editor integration.
   via power-of-two and bit-gap analysis.
 - **C++ RTTI & Class Hierarchy Reconstructor** — reconstructs polymorphic C++ class names, CompleteObjectLocator tables, virtual method slot lists, and inheritance hierarchies from MSVC and Itanium ABI binaries, with direct export to compilable C++ headers (`typemorph rtti --format=cpp`).
 - **Binary Hardening & Security Inspector (`checksec`)** — audits binary protections (ASLR, HighEntropyVA, DEP/NX, Control Flow Guard, CET Shadow Stack, SafeSEH, Authenticode signatures, PIE, RELRO, Stack Canary), detects common packers (UPX, ASPack, PECompact, VMProtect, Themida, Enigma, PyInstaller), flags section anomalies ($W \oplus X$ violations, high expansion ratios), overlay data, and anti-analysis evasion tactics (`typemorph checksec`).
+- **Golang pclntab & Metadata Reconstructor** — extracts stripped Go functions, entry VAs, frame sizes, and package hierarchies from Go 1.2 through Go 1.23+ runtime formats (`typemorph go`).
+- **MSVC Rich Header & Compiler Fingerprinting** — decodes XOR-encrypted `@comp.id` records, resolves Visual C++ compiler/linker tool IDs and build numbers, infers Visual Studio release version, and calculates RichPE telemetry hashes (`typemorph rich`).
+- **Calling Convention & Function Signature Classifier** — detects function prologues, frame sizes, register arguments, and stack purges to classify calling conventions (`__cdecl`, `__stdcall`, `__fastcall`, `__thiscall`, `__win64`, `__sysv`), argument counts, and emits complete C/C++ prototypes (`typemorph abi`).
 - **DeRust** — validates Rust fat pointers `(ptr, len)` against `.rodata`,
   reconstructs `[drop_in_place, size, align, methods...]` trait vtables, and
   demangles both legacy `_ZN...E` and modern `_Rv0` symbols.
@@ -155,6 +158,16 @@ typemorph rtti target.exe --format=cpp
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe
 
+# Reconstruct Golang pclntab, packages, and functions from stripped Go binary
+typemorph go target.elf
+
+# Decode MSVC Rich Header, build numbers, and compiler fingerprints
+typemorph rich target.exe
+
+# Classify calling conventions, argument registers, and generate C prototypes
+typemorph abi target.exe
+typemorph abi target.exe --function=0x140001000
+
 # Terminal ASCII Shannon entropy visualizer & packed section detector
 typemorph entropy sample.bin --block-size=64
 
@@ -200,7 +213,7 @@ python integrations/r2/typemorph_r2.py path/to/binary
 }}
 ```
 
-Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `cff`, `bitfield`, `apihash`, `opaque`, `rtti`, `checksec`, `entropy`, `sig`, `crypto`, `diff`
+Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `cff`, `bitfield`, `apihash`, `opaque`, `rtti`, `checksec`, `go`, `rich`, `abi`, `entropy`, `sig`, `crypto`, `diff`
 (also namespaced as `typemorph.*`). Notifications (requests without `id`) are
 executed without a reply, per JSON-RPC 2.0.
 

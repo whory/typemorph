@@ -322,6 +322,63 @@ class TypeMorphIdaSync:
                     cmt += f"  Anti-Analysis: {', '.join(anti)}\n"
                 ida_bytes.set_cmt(ep, cmt, True)
 
+    def sync_go(self) -> None:
+        """Reconstructs Golang functions, packages, and pclntab symbols in IDA."""
+        print(f"[TypeMorph IDA] Reconstructing Golang metadata in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "go", self.target_path)
+        if not data or not data.get("detected"):
+            return
+        fns = data.get("functions", [])
+        print(f"[TypeMorph IDA] Found {len(fns)} Go function(s) ({data.get('version')})")
+        if IN_IDA:
+            for fn in fns:
+                name = fn.get("name", "")
+                va = fn.get("entry_va", 0)
+                if va and name:
+                    sanitized = name.replace(" ", "_").replace("·", "_").replace(".", "__")
+                    ida_name.set_name(va, f"go__{sanitized}", ida_name.SN_NOWARN)
+                    ida_bytes.set_cmt(va, f"[TypeMorph Go] {name}", False)
+
+    def sync_rich(self) -> None:
+        """Extracts MSVC Rich Header compiler telemetry and build fingerprints in IDA."""
+        print(f"[TypeMorph IDA] Decoding MSVC Rich Header in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "rich", self.target_path)
+        if not data or not data.get("present"):
+            return
+        recs = data.get("records", [])
+        hash_val = data.get("hash", "")
+        vs_versions = data.get("compiler_versions", [])
+        print(f"[TypeMorph IDA] Rich Header: Hash {hash_val}, Toolsets: {', '.join(vs_versions)}")
+        if IN_IDA:
+            off = data.get("offset", 0x80)
+            ea = ida_nalt.get_imagebase() + off
+            cmt = f"[TypeMorph MSVC Rich Header]\n  Hash: {hash_val}\n  Toolsets: {', '.join(vs_versions)}\n"
+            for r in recs[:8]:
+                cmt += f"  {r.get('tool_name')} (Build {r.get('build_number')}): {r.get('count')} objects [{r.get('vs_version')}]\n"
+            ida_bytes.set_cmt(ea, cmt, True)
+
+    def sync_abi(self) -> None:
+        """Classifies function calling conventions and sets function prototypes in IDA."""
+        print(f"[TypeMorph IDA] Classifying calling conventions in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "abi", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        dist = data.get("conventions", {})
+        print(f"[TypeMorph IDA] Analyzed {len(sigs)} function(s). Conventions: {dist}")
+        if IN_IDA:
+            for s in sigs:
+                va = s.get("entry_va", 0)
+                proto = s.get("prototype", "")
+                conv = s.get("convention", "")
+                rat = s.get("rationale", "")
+                if va:
+                    ida_bytes.set_cmt(va, f"[TypeMorph ABI] {proto}\nConvention: {conv} ({rat})", True)
+                    try:
+                        ida_typeinf.apply_cdecl(None, va, proto)
+                    except Exception:
+                        pass
+
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
@@ -332,6 +389,9 @@ class TypeMorphIdaSync:
         self.sync_opaque()
         self.sync_rtti()
         self.sync_checksec()
+        self.sync_go()
+        self.sync_rich()
+        self.sync_abi()
         print("[TypeMorph IDA] Synchronization complete!")
 
 

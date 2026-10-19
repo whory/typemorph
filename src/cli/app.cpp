@@ -23,6 +23,9 @@
 #include "typemorph/emitter/kaitai_emitter.hpp"
 #include "typemorph/emitter/rust_emitter.hpp"
 #include "typemorph/infer/diff_engine.hpp"
+#include "typemorph/go/go_analyzer.hpp"
+#include "typemorph/pe/rich_header.hpp"
+#include "typemorph/abi/calling_convention.hpp"
 #include "typemorph/rtti/rtti_analyzer.hpp"
 #include "typemorph/security/security_analyzer.hpp"
 #include "typemorph/tui/dashboard.hpp"
@@ -646,9 +649,21 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph rtti <binary> [--format=cpp|json] [--json]\n"
                "Reconstruct C++ polymorphic class names, inheritance hierarchy, and vftables from RTTI.\n";
     }
+    if (command == "go") {
+        return "Usage: typemorph go <binary> [--json]\n"
+               "Reconstruct Golang functions, packages, and pclntab symbol metadata from stripped binaries.\n";
+    }
+    if (command == "rich") {
+        return "Usage: typemorph rich <binary> [--json]\n"
+               "Extract and decode MSVC Rich Header compiler artifacts, tool IDs, and build fingerprints.\n";
+    }
     if (command == "checksec") {
         return "Usage: typemorph checksec <binary> [--json]\n"
                "Inspect binary security mitigations (ASLR, DEP, CFG, SafeSEH, CET), packers, and section anomalies.\n";
+    }
+    if (command == "abi") {
+        return "Usage: typemorph abi <binary> [--function=VA] [--json]\n"
+               "Classify calling conventions (__cdecl, __stdcall, __fastcall, __thiscall, __win64, __sysv), argument registers, and recover C prototypes.\n";
     }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
@@ -667,7 +682,10 @@ std::string command_help(std::string_view command) {
            "  apihash <file|hash>  Resolve API hashes & scan for hidden imports\n"
            "  opaque <binary>      Detect invariant opaque predicates & dead code\n"
            "  rtti <binary>        Reconstruct C++ RTTI classes & vftables\n"
+           "  go <binary>          Recover Go functions, packages & pclntab symbols\n"
+           "  rich <binary>        Decode MSVC Rich Header & compiler telemetry\n"
            "  checksec <binary>    Inspect binary hardening, packers & anomalies\n"
+           "  abi <binary>         Classify calling conventions & recover C prototypes\n"
            "  entropy <file>       Shannon entropy graph & high-density zones\n"
            "  sig <binary>         Generate YARA rule from invariants & strings\n"
            "  crypto <file>        Detect cryptographic & hashing constants\n"
@@ -2336,6 +2354,314 @@ int command_checksec(const Arguments& args, std::ostream& out, std::ostream& err
     return 0;
 }
 
+JsonValue go_report_to_json(const std::string& path, const golang::GoAnalysisReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["detected"] = JsonValue(rep.detected);
+    doc["version"] = JsonValue(std::string(golang::to_string(rep.version)));
+    doc["ptr_size"] = JsonValue(static_cast<std::uint64_t>(rep.ptr_size));
+    doc["quantum"] = JsonValue(static_cast<std::uint64_t>(rep.quantum));
+    doc["pclntab_va"] = JsonValue(rep.pclntab_va);
+    doc["function_count"] = JsonValue(static_cast<std::uint64_t>(rep.functions.size()));
+    doc["user_functions"] = JsonValue(static_cast<std::uint64_t>(rep.user_functions));
+    doc["runtime_functions"] = JsonValue(static_cast<std::uint64_t>(rep.runtime_functions));
+
+    JsonValue pkgs = JsonValue::array();
+    for (const auto& pkg : rep.packages) {
+        pkgs.push(JsonValue(pkg));
+    }
+    doc["packages"] = std::move(pkgs);
+
+    JsonValue fns = JsonValue::array();
+    for (const auto& fn : rep.functions) {
+        JsonValue f = JsonValue::object();
+        f["name"] = JsonValue(fn.name);
+        f["package"] = JsonValue(fn.package_name);
+        f["entry_va"] = JsonValue(fn.entry_va);
+        fns.push(std::move(f));
+    }
+    doc["functions"] = std::move(fns);
+
+    return doc;
+}
+
+JsonValue rich_report_to_json(const std::string& path, const pe::RichHeaderReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["present"] = JsonValue(rep.present);
+    doc["xor_key"] = JsonValue(static_cast<std::uint64_t>(rep.xor_key));
+    doc["offset"] = JsonValue(rep.offset);
+    doc["size"] = JsonValue(static_cast<std::uint64_t>(rep.size));
+    doc["checksum"] = JsonValue(static_cast<std::uint64_t>(rep.checksum));
+    doc["hash"] = JsonValue(rep.hash);
+
+    JsonValue versions = JsonValue::array();
+    for (const auto& vs : rep.compiler_versions) {
+        versions.push(JsonValue(vs));
+    }
+    doc["compiler_versions"] = std::move(versions);
+
+    JsonValue recs = JsonValue::array();
+    for (const auto& r : rep.records) {
+        JsonValue item = JsonValue::object();
+        item["tool_id"] = JsonValue(static_cast<std::uint64_t>(r.tool_id));
+        item["tool_name"] = JsonValue(r.tool_name);
+        item["build_number"] = JsonValue(static_cast<std::uint64_t>(r.build_number));
+        item["count"] = JsonValue(static_cast<std::uint64_t>(r.count));
+        item["vs_version"] = JsonValue(r.vs_version);
+        recs.push(std::move(item));
+    }
+    doc["records"] = std::move(recs);
+
+    return doc;
+}
+
+int command_go(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("go");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph go: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    golang::GoAnalyzer analyzer;
+    auto image_res = core::ExecutableImage::parse(view.value());
+    golang::GoAnalysisReport rep = image_res
+        ? analyzer.analyze(image_res.value())
+        : analyzer.analyze_view(view.value());
+
+    if (args.has("json")) {
+        auto doc = go_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph Golang pclntab & Metadata Reconstructor\n"
+        << "  Target: " << path << "\n";
+
+    if (!rep.detected) {
+        out << "  No Go pclntab runtime structures detected (not a Go binary or heavily stripped/encrypted).\n";
+        return 0;
+    }
+
+    char va_buf[32];
+    std::snprintf(va_buf, sizeof(va_buf), "0x%llx", static_cast<unsigned long long>(rep.pclntab_va));
+    out << "  Go Runtime Version: " << golang::to_string(rep.version) << " (" << rep.ptr_size * 8 << "-bit)\n"
+        << "  Pclntab Base VA:    " << va_buf << "\n"
+        << "  Functions Total:    " << rep.functions.size() << " (User: " << rep.user_functions
+        << ", Runtime: " << rep.runtime_functions << ")\n"
+        << "  Unique Packages:    " << rep.packages.size() << "\n\n";
+
+    if (!rep.packages.empty()) {
+        out << "Packages Detected:\n";
+        for (const auto& pkg : rep.packages) {
+            out << "  - " << pkg << "\n";
+        }
+        out << "\n";
+    }
+
+    out << "Functions Sample (first 50):\n";
+    std::size_t limit = std::min<std::size_t>(rep.functions.size(), 50);
+    for (std::size_t i = 0; i < limit; ++i) {
+        const auto& fn = rep.functions[i];
+        char f_buf[32];
+        std::snprintf(f_buf, sizeof(f_buf), "0x%llx", static_cast<unsigned long long>(fn.entry_va));
+        out << "  [" << f_buf << "] " << fn.name << "\n";
+    }
+    if (rep.functions.size() > limit) {
+        out << "  ... and " << (rep.functions.size() - limit) << " more functions (use --json to view all).\n";
+    }
+
+    return 0;
+}
+
+int command_rich(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("rich");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph rich: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    pe::RichHeaderParser parser;
+    auto rep = parser.parse(view.value());
+
+    if (args.has("json")) {
+        auto doc = rich_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph MSVC Rich Header & Compiler Fingerprinter\n"
+        << "  Target: " << path << "\n";
+
+    if (!rep.present) {
+        out << "  No MSVC Rich header present (binary not built with MSVC or stripped).\n";
+        return 0;
+    }
+
+    char key_buf[32], off_buf[32];
+    std::snprintf(key_buf, sizeof(key_buf), "0x%08X", rep.xor_key);
+    std::snprintf(off_buf, sizeof(off_buf), "0x%llx", static_cast<unsigned long long>(rep.offset));
+
+    out << "  Offset:      " << off_buf << " (" << rep.size << " bytes)\n"
+        << "  XOR Key:     " << key_buf << "\n"
+        << "  Checksum:    0x" << std::hex << std::uppercase << rep.checksum << std::dec << "\n"
+        << "  RichPE Hash: " << rep.hash << "\n\n";
+
+    if (!rep.compiler_versions.empty()) {
+        out << "Compilers / Toolsets Identified:\n";
+        for (const auto& vs : rep.compiler_versions) {
+            out << "  - " << vs << "\n";
+        }
+        out << "\n";
+    }
+
+    out << "Decoded Tool Records (" << rep.records.size() << "):\n";
+    for (const auto& rec : rep.records) {
+        char comp_buf[32];
+        std::snprintf(comp_buf, sizeof(comp_buf), "0x%04X", rec.tool_id);
+        out << "  [" << comp_buf << "] " << rec.tool_name << " (Build " << rec.build_number
+            << "): " << rec.count << " artifact(s) [" << rec.vs_version << "]\n";
+    }
+
+    return 0;
+}
+
+JsonValue abi_report_to_json(const std::string& path, const abi::AbiReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["total_functions"] = JsonValue(static_cast<std::uint64_t>(rep.total_functions));
+
+    JsonValue dist = JsonValue::object();
+    for (const auto& [k, v] : rep.convention_distribution) {
+        dist[k] = JsonValue(static_cast<std::uint64_t>(v));
+    }
+    doc["conventions"] = std::move(dist);
+
+    JsonValue fns = JsonValue::array();
+    for (const auto& sig : rep.signatures) {
+        JsonValue item = JsonValue::object();
+        item["entry_va"] = JsonValue(sig.entry_va);
+        item["name"] = JsonValue(sig.name);
+        item["convention"] = JsonValue(std::string(abi::to_string(sig.convention)));
+        item["return_kind"] = JsonValue(std::string(abi::to_string(sig.return_kind)));
+        item["return_type"] = JsonValue(sig.return_type_hint);
+        item["stack_frame_size"] = JsonValue(static_cast<std::uint64_t>(sig.stack_frame_size));
+        item["stack_purge_bytes"] = JsonValue(static_cast<std::uint64_t>(sig.stack_purge_bytes));
+        item["prototype"] = JsonValue(sig.prototype);
+        item["rationale"] = JsonValue(sig.rationale);
+        item["confidence"] = JsonValue(sig.confidence);
+
+        JsonValue args = JsonValue::array();
+        for (const auto& a : sig.arguments) {
+            JsonValue a_item = JsonValue::object();
+            a_item["index"] = JsonValue(static_cast<std::uint64_t>(a.index));
+            a_item["name"] = JsonValue(a.name);
+            a_item["location"] = JsonValue(a.location);
+            a_item["type_hint"] = JsonValue(a.type_hint);
+            args.push(std::move(a_item));
+        }
+        item["arguments"] = std::move(args);
+        fns.push(std::move(item));
+    }
+    doc["signatures"] = std::move(fns);
+    return doc;
+}
+
+int command_abi(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("abi");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph abi: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto image_res = core::ExecutableImage::parse(view.value());
+    if (!image_res) {
+        err << "typemorph abi: " << format_error(image_res.error()) << '\n';
+        return 1;
+    }
+
+    std::optional<std::uint64_t> target_va;
+    if (auto fn_str = args.get("function")) {
+        auto val = parse_u64(*fn_str, "function");
+        if (!val) {
+            std::string_view sv = *fn_str;
+            if (sv.starts_with("0x") || sv.starts_with("0X")) sv.remove_prefix(2);
+            char* end_ptr = nullptr;
+            std::string clean(sv);
+            std::uint64_t hex_va = std::strtoull(clean.c_str(), &end_ptr, 16);
+            if (end_ptr != clean.c_str() && *end_ptr == '\0') {
+                target_va = hex_va;
+            } else {
+                err << "typemorph abi: invalid function address " << *fn_str << '\n';
+                return 1;
+            }
+        } else {
+            target_va = val.value();
+        }
+    }
+
+    abi::AbiClassifier classifier;
+    auto rep = classifier.analyze(image_res.value(), target_va);
+
+    if (args.has("json")) {
+        auto doc = abi_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph Calling Convention & ABI Classifier\n"
+        << "  Target: " << path << "\n"
+        << "  Functions Analyzed: " << rep.total_functions << "\n\n";
+
+    if (!rep.convention_distribution.empty()) {
+        out << "Calling Convention Distribution:\n";
+        for (const auto& [conv, count] : rep.convention_distribution) {
+            double pct = (rep.total_functions > 0) ? (100.0 * static_cast<double>(count) / static_cast<double>(rep.total_functions)) : 0.0;
+            out << "  - " << std::left << std::setw(16) << conv << ": " << count
+                << " (" << std::fixed << std::setprecision(1) << pct << "%)\n";
+        }
+        out << "\n";
+    }
+
+    out << "Recovered Function Signatures (" << rep.signatures.size() << "):\n";
+    std::size_t limit = std::min<std::size_t>(rep.signatures.size(), 50);
+    for (std::size_t i = 0; i < limit; ++i) {
+        const auto& sig = rep.signatures[i];
+        char va_buf[32];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llx", static_cast<unsigned long long>(sig.entry_va));
+        out << "  [" << va_buf << "] " << sig.prototype << "\n"
+            << "     Convention: " << to_string(sig.convention)
+            << " | Frame: " << sig.stack_frame_size << "B";
+        if (sig.stack_purge_bytes > 0) {
+            out << " | Purge: " << sig.stack_purge_bytes << "B";
+        }
+        out << " | " << sig.rationale << "\n";
+    }
+    if (rep.signatures.size() > limit) {
+        out << "  ... and " << (rep.signatures.size() - limit) << " more functions (use --json to view all).\n";
+    }
+
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -2426,6 +2752,9 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("opaque"));
         capabilities.push(JsonValue("rtti"));
         capabilities.push(JsonValue("checksec"));
+        capabilities.push(JsonValue("go"));
+        capabilities.push(JsonValue("rich"));
+        capabilities.push(JsonValue("abi"));
         result["capabilities"] = std::move(capabilities);
         return result;
     }
@@ -2979,6 +3308,43 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         auto report = analyzer.analyze_view(view_result.value());
         return security_report_to_json(file.value(), report);
     }
+    if (method == "go" || method == "typemorph.go") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        golang::GoAnalyzer analyzer;
+        auto image_res = core::ExecutableImage::parse(view_result.value());
+        golang::GoAnalysisReport rep = image_res
+            ? analyzer.analyze(image_res.value())
+            : analyzer.analyze_view(view_result.value());
+        return go_report_to_json(file.value(), rep);
+    }
+    if (method == "rich" || method == "typemorph.rich") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        pe::RichHeaderParser parser;
+        auto report = parser.parse(view_result.value());
+        return rich_report_to_json(file.value(), report);
+    }
+    if (method == "abi" || method == "typemorph.abi") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto image_res = core::ExecutableImage::parse(view_result.value());
+        if (!image_res) return image_res.error();
+        abi::AbiClassifier classifier;
+        std::optional<std::uint64_t> target_va;
+        const auto* fn_val = params.find("function");
+        if (fn_val && fn_val->as_int()) {
+            target_va = static_cast<std::uint64_t>(*fn_val->as_int());
+        }
+        auto rep = classifier.analyze(image_res.value(), target_va);
+        return abi_report_to_json(file.value(), rep);
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -3238,6 +3604,36 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_checksec(parsed.value(), out_, err_);
+    }
+    if (command == "go") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_go(parsed.value(), out_, err_);
+    }
+    if (command == "rich") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_rich(parsed.value(), out_, err_);
+    }
+    if (command == "abi") {
+        auto parsed = parse_arguments(
+            rest, {"function"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_abi(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";
