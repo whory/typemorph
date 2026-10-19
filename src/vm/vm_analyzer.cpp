@@ -1,5 +1,5 @@
-// TypeMorph - Advanced Virtualization & VM Handler Profiler Implementation (VMDragonSlayer / NoVmp / Magicmida)
 #include "typemorph/vm/vm_analyzer.hpp"
+#include "typemorph/core/executable.hpp"
 
 #include <algorithm>
 #include <iomanip>
@@ -45,6 +45,34 @@ bool VmProfiler::is_virtualized(const BinaryView& view) {
         return true;
     }
 
+    // VMProtect 3.x x64 entry pattern: 41 57 49 BF ... 9C 4D 2B FF
+    const std::uint8_t vmp3_x64_seq1[4] = {0x41, 0x57, 0x49, 0xBF};
+    const std::uint8_t vmp3_x64_seq2[4] = {0x9C, 0x4D, 0x2B, 0xFF};
+    if (std::search(data, data + size, vmp3_x64_seq1, vmp3_x64_seq1 + 4) != data + size &&
+        std::search(data, data + size, vmp3_x64_seq2, vmp3_x64_seq2 + 4) != data + size) {
+        return true;
+    }
+
+    // PE structural check: unnamed sections and wiped raw code sections
+    auto img_res = core::ExecutableImage::parse(view);
+    if (img_res) {
+        std::size_t unnamed_cnt = 0;
+        std::size_t wiped_code_cnt = 0;
+        std::uint64_t max_sec_sz = 0;
+        for (const auto& sec : img_res.value().sections()) {
+            if (sec.name.empty() || sec.name.front() == '\0') {
+                ++unnamed_cnt;
+                if (sec.file_size > max_sec_sz) max_sec_sz = sec.file_size;
+            }
+            if (sec.executable() && sec.file_size == 0 && sec.virtual_size > 0x10000) {
+                ++wiped_code_cnt;
+            }
+        }
+        if (unnamed_cnt >= 2 && wiped_code_cnt >= 1 && max_sec_sz >= 0x100000) {
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -56,8 +84,33 @@ VmProfileReport VmProfiler::analyze(const BinaryView& view) {
     const auto* data = view.data();
     std::size_t size = view.size();
 
+    bool has_vmp3_structural = false;
+    auto img_res = core::ExecutableImage::parse(view);
+    if (img_res) {
+        std::size_t unnamed_cnt = 0;
+        std::size_t wiped_code_cnt = 0;
+        std::uint64_t max_sec_sz = 0;
+        for (const auto& sec : img_res.value().sections()) {
+            if (sec.name.empty() || sec.name.front() == '\0') {
+                ++unnamed_cnt;
+                if (sec.file_size > max_sec_sz) max_sec_sz = sec.file_size;
+            }
+            if (sec.executable() && sec.file_size == 0 && sec.virtual_size > 0x10000) {
+                ++wiped_code_cnt;
+            }
+        }
+        if (unnamed_cnt >= 2 && wiped_code_cnt >= 1 && max_sec_sz >= 0x100000) {
+            has_vmp3_structural = true;
+        }
+    }
+
+    const std::uint8_t vmp3_x64_seq1[4] = {0x41, 0x57, 0x49, 0xBF};
+    const std::uint8_t vmp3_x64_seq2[4] = {0x9C, 0x4D, 0x2B, 0xFF};
+    bool has_vmp3_x64_ep = (std::search(data, data + size, vmp3_x64_seq1, vmp3_x64_seq1 + 4) != data + size &&
+                            std::search(data, data + size, vmp3_x64_seq2, vmp3_x64_seq2 + 4) != data + size);
+
     // 1. Identify protector engine
-    if (contains_str(data, size, ".vmp") || contains_str(data, size, "VMProtect")) {
+    if (contains_str(data, size, ".vmp") || contains_str(data, size, "VMProtect") || has_vmp3_structural || has_vmp3_x64_ep) {
         report.detected_protector = "VMProtect 3.x (Bytecode VM)";
         report.vsp_register = "RBP (Virtual Stack Pointer)";
         report.vip_register = "RSI (Virtual Instruction Pointer)";

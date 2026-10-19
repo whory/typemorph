@@ -98,6 +98,35 @@ SecurityReport SecurityAnalyzer::analyze(const core::ExecutableImage& image) con
         }
     }
 
+    // Structural VMProtect / Packer check when section names are stripped
+    if (image.format() == core::ImageFormat::pe) {
+        std::size_t empty_or_unnamed = 0;
+        std::size_t zero_raw_code = 0;
+        std::uint64_t max_packed_sz = 0;
+        for (const auto& sec : sections) {
+            if (sec.name.empty() || sec.name.find('\0') == 0 || sec.name == "") {
+                ++empty_or_unnamed;
+                if (sec.file_size > max_packed_sz) max_packed_sz = sec.file_size;
+            }
+            if (sec.executable() && sec.file_size == 0 && sec.virtual_size > 0x10000) {
+                ++zero_raw_code;
+            }
+        }
+        if (empty_or_unnamed >= 2 && zero_raw_code >= 1 && max_packed_sz >= 0x100000) {
+            bool already = false;
+            for (const auto& p : report.packers) {
+                if (p.name == "VMProtect") { already = true; break; }
+            }
+            if (!already) {
+                report.packers.push_back({
+                    "VMProtect", 0.97,
+                    "VMProtect 3.x structural heuristic (" + std::to_string(empty_or_unnamed) +
+                    " unnamed sections, wiped raw code, " + std::to_string(max_packed_sz / (1024 * 1024)) + " MB payload)"
+                });
+            }
+        }
+    }
+
     report.entry_point_outside_code = (!ep_found_in_code && image.entry_point() != 0);
 
     // 2. Overlay detection

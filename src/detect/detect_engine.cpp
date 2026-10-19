@@ -105,9 +105,12 @@ const EpSignatureRule kEpRules[] = {
      "Themida entry point initialization stub"},
 
     // --- VMProtect ---
-    {DetectionCategory::protector, "VMProtect", "2.X - 3.X", 0.96,
+    {DetectionCategory::protector, "VMProtect", "2.X - 3.X (x86)", 0.96,
      "68 ?? ?? ?? ?? E9 ?? ?? ?? ??",
      "VMProtect entry point push constant & jump to VM handler"},
+    {DetectionCategory::protector, "VMProtect", "3.X (x64)", 0.98,
+     "41 57 49 BF ?? ?? ?? ?? ?? ?? ?? ?? 9C 4D 2B FF",
+     "VMProtect 3.x x64 entry sequence (push r15; mov r15, imm64; pushfq; sub r15, r15)"},
 
     // --- Enigma Protector ---
     {DetectionCategory::protector, "Enigma Protector", "5.X - 7.X", 0.96,
@@ -325,6 +328,41 @@ DetectionReport DetectorEngine::detect(const core::ExecutableImage& image) const
             report.matches.push_back({
                 DetectionCategory::packer, "Spoon Studio / Turbo", "11.x+", 0.98,
                 "Spoon Studio virtual environment section", sec.file_offset
+            });
+        }
+    }
+
+    // 3b. Structural & Anomaly Heuristics for VMProtect / Themida (Packed without explicit section names)
+    if (image.format() == core::ImageFormat::pe) {
+        std::size_t empty_or_unnamed_sections = 0;
+        std::size_t virtual_code_no_raw_sections = 0;
+        std::uint64_t max_packed_sec_size = 0;
+        std::uint64_t max_packed_sec_offset = 0;
+
+        for (const auto& sec : image.sections()) {
+            if (sec.name.empty() || sec.name.find('\0') == 0 || sec.name == "") {
+                ++empty_or_unnamed_sections;
+                if (sec.file_size > max_packed_sec_size) {
+                    max_packed_sec_size = sec.file_size;
+                    max_packed_sec_offset = sec.file_offset;
+                }
+            }
+            if (sec.executable() && sec.file_size == 0 && sec.virtual_size > 0x10000) {
+                ++virtual_code_no_raw_sections;
+            }
+        }
+
+        // Typical VMProtect 3.x packing signature:
+        // 1. Unnamed / stripped section names (empty or all nulls) appended to PE
+        // 2. Original code sections (.text, .rdata, etc.) wiped with file_size = 0 and moved to virtual code
+        // 3. One or more massive packed / virtual sections containing the VM dispatcher and bytecode
+        if (empty_or_unnamed_sections >= 2 && virtual_code_no_raw_sections >= 1 && max_packed_sec_size >= 0x100000) {
+            report.matches.push_back({
+                DetectionCategory::protector, "VMProtect", "3.x", 0.97,
+                "VMProtect 3.x structural signature: " + std::to_string(empty_or_unnamed_sections) +
+                " stripped/unnamed sections with wiped raw code sections and massive virtual payload (" +
+                std::to_string(max_packed_sec_size / (1024 * 1024)) + " MB)",
+                max_packed_sec_offset
             });
         }
     }
