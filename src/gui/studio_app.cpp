@@ -36,6 +36,7 @@ constexpr int IDM_ACTION_VMPROFILE   = 1005;
 constexpr int IDM_ACTION_UNPACK      = 1006;
 constexpr int IDM_ACTION_VFS         = 1007;
 constexpr int IDM_ACTION_IATFIX      = 1008;
+constexpr int IDM_ACTION_MEMDUMP     = 1009;
 
 // Decompiler Modes
 constexpr int IDM_VIEW_CSHARP        = 1010;
@@ -409,6 +410,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_pApp) g_pApp->run_iat_fix();
             return 0;
         }
+        if (id == IDM_ACTION_MEMDUMP) {
+            if (g_pApp) g_pApp->run_memdump_fix();
+            return 0;
+        }
 
         // View Mode Switches
         if (id == IDM_VIEW_CSHARP) { if (g_pApp) g_pApp->set_mode(DecompilerMode::csharp); return 0; }
@@ -508,6 +513,7 @@ void SetupMenus(HWND hwnd) {
     AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_UNPACK,    L"&Universal PE Unpacker & Header Fix (UPX / ASPack)");
     AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_VFS,       L"&Virtual Filesystem Payload Extractor (Spoon/Enigma)");
     AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_IATFIX,    L"&Import Address Table (IAT) Reconstructor");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_MEMDUMP,   L"&Memory Dump Fixer & PE Reconstructor (vmpdump / Scylla)");
     AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hAnalysis), L"&Analysis");
 
     // Help Menu
@@ -762,6 +768,17 @@ void StudioApp::run_iat_fix() {
     std::string report = pe::IatReconstructor::to_text_summary(rep);
     SetWindowTextW(g_hwndCode, normalize_crlf(report).c_str());
     LogMessage("[IAT Reconstructor] Discovered " + std::to_string(rep.total_functions) + " API calls.");
+}
+
+void StudioApp::run_memdump_fix() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    auto rep = dump::DumpFixer::analyze(view.value());
+    std::string report = dump::DumpFixer::format_report(rep);
+    SetWindowTextW(g_hwndCode, normalize_crlf(report).c_str());
+    LogMessage("[Memory Dump Fixer] Source: " + rep.detected_source + " | Sections: " + std::to_string(rep.sections.size()));
 }
 
 int StudioApp::run(const std::string& initial_file) {

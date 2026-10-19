@@ -44,6 +44,7 @@
 #include "typemorph/unpack/vfs_extractor.hpp"
 #include "typemorph/unpack/universal_unpacker.hpp"
 #include "typemorph/vm/vm_analyzer.hpp"
+#include "typemorph/dump/dump_fixer.hpp"
 #ifdef _WIN32
 #include "typemorph/gui/studio_app.hpp"
 #endif
@@ -755,6 +756,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph unpack <binary> [--out=unpacked.exe] [--json]\n"
                "Universal PE Unpacker & Header Recovery (unipacker / UPX / ASPack / PECompact): restores original PE headers and recovers OEP.\n";
     }
+    if (command == "memdump" || command == "vmpdump" || command == "fixdump") {
+        return "Usage: typemorph memdump <dump.bin> [--out=fixed.exe] [--oep=VA] [--json]\n"
+               "Memory Dump Fixer & Dynamic PE Reconstructor (vmpdump / WriteProcess-Dumper / Scylla): aligns sections and rebuilds PE from memory dumps.\n";
+    }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
                "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
@@ -779,6 +784,7 @@ std::string command_help(std::string_view command) {
            "  vfs-extract <bin>    Virtual Filesystem Extractor (Spoon Studio, Enigma Virtual Box, BoxedApp)\n"
            "  vmslayer <binary>    Advanced VM Profiler & handler classifier (VMProtect / Themida / NoVmp)\n"
            "  unpack <binary>      Universal PE Unpacker & Header Recovery (unipacker / UPX / ASPack)\n"
+           "  memdump <dump.bin>   Memory Dump Fixer & PE Reconstructor (vmpdump / WriteProcess-Dumper)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
@@ -4132,6 +4138,78 @@ int command_unpack(const Arguments& args, std::ostream& out, std::ostream& err) 
     return 0;
 }
 
+int command_memdump(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("memdump");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph memdump: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    std::uint64_t target_oep = 0;
+    if (auto oep_val = args.get("oep")) {
+        std::string_view sv = *oep_val;
+        if (sv.starts_with("0x") || sv.starts_with("0X")) sv.remove_prefix(2);
+        char* end_ptr = nullptr;
+        std::string clean(sv);
+        target_oep = std::strtoull(clean.c_str(), &end_ptr, 16);
+    }
+
+    auto rep = dump::DumpFixer::analyze(view.value());
+    if (args.has("out")) {
+        auto res = dump::DumpFixer::fix(view.value(), target_oep);
+        if (!res.success) {
+            err << "typemorph memdump: failed to fix dump: " << res.error_message << '\n';
+            return 1;
+        }
+        const std::string out_path = args.get("out").value();
+        auto written = write_binary_file(out_path, res.fixed_pe_image);
+        if (!written) {
+            err << "typemorph memdump: cannot write fixed PE to " << out_path << '\n';
+            return 1;
+        }
+        out << "typemorph memdump: reconstructed PE successfully written to " << out_path << '\n';
+        out << "  Source Dumper: " << res.report.detected_source << '\n';
+        out << "  Sections: " << res.report.sections.size() << '\n';
+        out << "  Entry Point RVA: 0x" << std::hex << res.report.original_entry_point_rva << std::dec << '\n';
+        return 0;
+    }
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["is_memory_dump"] = JsonValue(rep.is_memory_dump);
+        doc["detected_source"] = JsonValue(rep.detected_source);
+        doc["image_base"] = JsonValue(rep.image_base);
+        doc["entry_point_rva"] = JsonValue(static_cast<std::uint64_t>(rep.original_entry_point_rva));
+        doc["section_alignment"] = JsonValue(static_cast<std::uint64_t>(rep.section_alignment));
+        doc["file_alignment"] = JsonValue(static_cast<std::uint64_t>(rep.file_alignment));
+        JsonValue secs = JsonValue::array();
+        for (const auto& s : rep.sections) {
+            JsonValue item = JsonValue::object();
+            item["name"] = JsonValue(s.name);
+            item["virtual_address"] = JsonValue(static_cast<std::uint64_t>(s.virtual_address));
+            item["virtual_size"] = JsonValue(static_cast<std::uint64_t>(s.virtual_size));
+            item["raw_data_offset"] = JsonValue(static_cast<std::uint64_t>(s.raw_data_offset));
+            item["raw_data_size"] = JsonValue(static_cast<std::uint64_t>(s.raw_data_size));
+            item["is_executable"] = JsonValue(s.is_executable);
+            item["is_writable"] = JsonValue(s.is_writable);
+            secs.push(std::move(item));
+        }
+        doc["sections"] = std::move(secs);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << dump::DumpFixer::format_report(rep);
+    return 0;
+}
+
+
 
 
 
@@ -5052,6 +5130,35 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         doc["warnings"] = std::move(warnings);
         return doc;
     }
+    if (method == "memdump" || method == "typemorph.memdump" ||
+        method == "vmpdump" || method == "typemorph.vmpdump") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto rep = dump::DumpFixer::analyze(view_result.value());
+        JsonValue doc = JsonValue::object();
+        doc["is_memory_dump"] = JsonValue(rep.is_memory_dump);
+        doc["detected_source"] = JsonValue(rep.detected_source);
+        doc["image_base"] = JsonValue(rep.image_base);
+        doc["entry_point_rva"] = JsonValue(static_cast<std::uint64_t>(rep.original_entry_point_rva));
+        doc["section_alignment"] = JsonValue(static_cast<std::uint64_t>(rep.section_alignment));
+        doc["file_alignment"] = JsonValue(static_cast<std::uint64_t>(rep.file_alignment));
+        JsonValue secs = JsonValue::array();
+        for (const auto& s : rep.sections) {
+            JsonValue item = JsonValue::object();
+            item["name"] = JsonValue(s.name);
+            item["virtual_address"] = JsonValue(static_cast<std::uint64_t>(s.virtual_address));
+            item["virtual_size"] = JsonValue(static_cast<std::uint64_t>(s.virtual_size));
+            item["raw_data_offset"] = JsonValue(static_cast<std::uint64_t>(s.raw_data_offset));
+            item["raw_data_size"] = JsonValue(static_cast<std::uint64_t>(s.raw_data_size));
+            item["is_executable"] = JsonValue(s.is_executable);
+            item["is_writable"] = JsonValue(s.is_writable);
+            secs.push(std::move(item));
+        }
+        doc["sections"] = std::move(secs);
+        return doc;
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -5521,6 +5628,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_unpack(parsed.value(), out_, err_);
+    }
+    if (command == "memdump" || command == "vmpdump" || command == "fixdump") {
+        auto parsed = parse_arguments(
+            rest, {"out", "oep"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_memdump(parsed.value(), out_, err_);
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {

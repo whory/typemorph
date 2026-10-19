@@ -425,6 +425,13 @@ TEST_CASE("cli: unpack displays help") {
     CHECK(help_res.out.find("unipacker") != std::string::npos);
 }
 
+TEST_CASE("cli: memdump displays help") {
+    const auto help_res = invoke({"memdump", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("Memory Dump Fixer") != std::string::npos);
+}
+
+
 
 
 

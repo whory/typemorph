@@ -23,6 +23,7 @@
 #include "typemorph/derust/rust_source.hpp"
 #include "typemorph/detect/detect_engine.hpp"
 #include "typemorph/pe/iat_reconstructor.hpp"
+#include "typemorph/dump/dump_fixer.hpp"
 
 #include <string>
 #include <vector>
@@ -58,6 +59,7 @@ public:
     void run_unpack();
     void run_vfs_extract();
     void run_iat_fix();
+    void run_memdump_fix();
 
 private:
     std::string current_file_;
