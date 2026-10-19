@@ -184,12 +184,28 @@ class BinaryNinjaSync:
                     if h_va:
                         h_sym = Symbol(SymbolType.FunctionSymbol, h_va, f"vm_handler_{vm_idx}_op_{hex(opcode)}")
                         self.bv.define_auto_symbol(h_sym)
-                        self.bv.set_comment_at(h_va, f"[TypeMorph VM Opcode {hex(opcode)}] {mnemonic}")
+    def sync_crypto(self) -> None:
+        """Runs TypeMorph Crypto scanner and annotates cryptographic constants."""
+        print(f"[TypeMorph Binja] Scanning for crypto constants in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "crypto", self.target_path)
+        if not data:
+            return
+        matches = data.get("matches", [])
+        print(f"[TypeMorph Binja] Found {len(matches)} crypto constant(s)")
+        if self.bv:
+            for m in matches:
+                offset = m.get("offset", 0)
+                algo = m.get("algorithm", "")
+                role = m.get("role", "")
+                desc = m.get("description", "")
+                addr = self.bv.start + offset
+                self.bv.set_comment_at(addr, f"[TypeMorph Crypto] {algo} - {role} ({desc})")
 
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
+        self.sync_crypto()
         print("[TypeMorph Binja] Synchronization complete!")
 
 
@@ -199,7 +215,7 @@ def binja_sync_all(bv):
 
 
 if IN_BINJA:
-    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt)", "Run full TypeMorph analysis", binja_sync_all)
+    PluginCommand.register("TypeMorph\\Sync All (Rust, Strings, Devirt, Crypto)", "Run full TypeMorph analysis", binja_sync_all)
 
 
 def main():

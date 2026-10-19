@@ -182,12 +182,28 @@ class TypeMorphIdaSync:
                     mnemonic = h.get("mnemonic", "")
                     if h_ea:
                         ida_name.set_name(h_ea, f"vm_handler_{vm_idx}_op_{hex(opcode)}", ida_name.SN_NOWARN)
-                        ida_bytes.set_cmt(h_ea, f"[TypeMorph VM Opcode {hex(opcode)}] {mnemonic}", False)
+    def sync_crypto(self) -> None:
+        """Runs TypeMorph Crypto scanner and annotates cryptographic constants."""
+        print(f"[TypeMorph IDA] Scanning for crypto constants in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "crypto", self.target_path)
+        if not data:
+            return
+        matches = data.get("matches", [])
+        print(f"[TypeMorph IDA] Found {len(matches)} crypto constant(s)")
+        if IN_IDA:
+            for m in matches:
+                offset = m.get("offset", 0)
+                algo = m.get("algorithm", "")
+                role = m.get("role", "")
+                desc = m.get("description", "")
+                ea = ida_nalt.get_imagebase() + offset
+                ida_bytes.set_cmt(ea, f"[TypeMorph Crypto] {algo} - {role} ({desc})", False)
 
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
+        self.sync_crypto()
         print("[TypeMorph IDA] Synchronization complete!")
 
 

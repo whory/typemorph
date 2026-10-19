@@ -84,13 +84,26 @@ Confidence is a product of independent evidence; the CLI's
    - Function prologue validation: verifies code pointers against known x86/x64 prologs (`push rbp`, `mov rbp, rsp`, `sub rsp`, `endbr64`).
    - VM dispatcher identification: maps opcode indices to routine entry points and traces candidate bytecode streams.
 
-4. **Entropy Analysis Engine (`typemorph::core::calculate_entropy`)**:
+4. **Entropy Analysis Engine (`typemorph::core::shannon_entropy`)**:
    - Calculates exact Shannon entropy in bits per byte over sliding windows or uniform blocks.
    - Categorizes regions into `zero`/`sparse` (<1.0), `structured`/`code` (1.0-6.0), `compressed`/`text` (6.0-7.2), and `encrypted`/`packed` (>7.2).
    - Renders ASCII bar visualizations in CLI and density heat maps in TUI.
 5. **YARA Signature Generation Engine**:
    - Synthesizes robust detection rules matching invariant format magics, high-confidence recovered strings, and jump table entry points.
    - Outputs ready-to-deploy `.yar` rule files with structural conditions.
+6. **Crypto & Hash Constant Detector (`typemorph::crypto::CryptoScanner`)**:
+   - Matches cryptographic constants (AES forward/inverse S-boxes, Rijndael Rcon, SHA-256 / SHA-1 states & round constants, MD5 sine tables, ChaCha20/Salsa20 sigma/tau strings, CRC32 tables, and TEA deltas).
+   - Reports file offsets, algorithm family, roles, categories, and endianness.
+7. **Structural Binary Diff Engine (`typemorph::diff::BinaryDiffEngine`)**:
+   - Aligns and compares two binary files at the byte level with similarity scoring.
+   - Cross-analyzes sections and symbols when comparing two ELF, PE, or Mach-O executable images.
+
+## Emitters
+
+- **Kaitai Struct (`typemorph::emit::KaitaiEmitter`)**: Emits specification YAML adhering to Kaitai Struct 0.10.
+- **ImHex (`typemorph::emit::ImHexEmitter`)**: Emits ImHex `.hexpat` pattern definitions.
+- **C++20 (`typemorph::emit::CppEmitter`)**: Emits self-contained, zero-dependency C++20 deserialization headers.
+- **Rust (`typemorph::emit::RustEmitter`)**: Emits idiomatic `#[repr(C)]` Rust struct definitions and enums with derives.
 
 ## RE Suite Integrations
 
@@ -99,12 +112,12 @@ Confidence is a product of independent evidence; the CLI's
 - **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binary Ninja API v3/v4 plugin)
 - **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
 - Connects either standalone or through `typemorph serve --stdio` JSON-RPC.
-- Automatically renames subroutines from demangled Rust symbols, populates structure definitions for Rust trait vtables, adds comments for string slice pairs and stack strings, and labels VM dispatcher handlers.
+- Automatically renames subroutines from demangled Rust symbols, populates structure definitions for Rust trait vtables, adds comments for string slice pairs and stack strings, labels VM dispatcher handlers, and marks cryptographic constants.
 
 ## CLI / JSON-RPC
 
-`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `entropy`, `sig`, `serve`), builds engine options, and
-delegates to `KaitaiEmitter`/etc. `serve --stdio` performs line-delimited
+`cli::Application` parses Git-style subcommands (`infer`, `inspect`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `entropy`, `sig`, `crypto`, `diff`, `serve`), builds engine options, and
+delegates to `KaitaiEmitter`/`RustEmitter`/etc. `serve --stdio` performs line-delimited
 JSON-RPC 2.0 using the same helpers, so protocol and CLI behavior cannot drift.
 JSON is produced by the built-in `JsonValue` writer (or nlohmann/json when
 compiled in) with deterministic object ordering.

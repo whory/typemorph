@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
     TypeMorph
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Binary structure inference and Rust semantic recovery framework"
     HOMEPAGE_URL "https://github.com/typemorph/typemorph"
     LANGUAGES CXX
@@ -28,6 +28,8 @@ file(GLOB_RECURSE TYPEMORPH_EMITTER_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_
 file(GLOB_RECURSE TYPEMORPH_TUI_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/tui/*.cpp")
 file(GLOB_RECURSE TYPEMORPH_CLI_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/cli/*.cpp")
 file(GLOB_RECURSE TYPEMORPH_DEOBF_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/deobf/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_CRYPTO_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/crypto/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_DIFF_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/diff/*.cpp")
 
 add_library(
     typemorph_core STATIC
@@ -38,6 +40,8 @@ add_library(
     ${TYPEMORPH_TUI_SOURCES}
     ${TYPEMORPH_CLI_SOURCES}
     ${TYPEMORPH_DEOBF_SOURCES}
+    ${TYPEMORPH_CRYPTO_SOURCES}
+    ${TYPEMORPH_DIFF_SOURCES}
 )
 
 add_library(TypeMorph::Core ALIAS typemorph_core)

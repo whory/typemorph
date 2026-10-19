@@ -5,6 +5,7 @@
 #include "typemorph/core/entropy.hpp"
 #include "typemorph/core/executable.hpp"
 #include "typemorph/core/result.hpp"
+#include "typemorph/crypto/crypto_scanner.hpp"
 #include "typemorph/deobf/devirtualizer.hpp"
 #include "typemorph/deobf/strings.hpp"
 #include "typemorph/deobf/unxorer.hpp"
@@ -12,9 +13,11 @@
 #include "typemorph/derust/enum_reconstruct.hpp"
 #include "typemorph/derust/slice_scanner.hpp"
 #include "typemorph/derust/vtable_analyzer.hpp"
+#include "typemorph/diff/binary_diff.hpp"
 #include "typemorph/emitter/cpp_emitter.hpp"
 #include "typemorph/emitter/imhex_emitter.hpp"
 #include "typemorph/emitter/kaitai_emitter.hpp"
+#include "typemorph/emitter/rust_emitter.hpp"
 #include "typemorph/infer/diff_engine.hpp"
 #include "typemorph/tui/dashboard.hpp"
 
@@ -180,16 +183,17 @@ core::ByteOrder parse_endian(std::string_view text) {
     return text == "big" || text == "be" ? core::ByteOrder::big : core::ByteOrder::little;
 }
 
-enum class OutputFormat { kaitai, imhex, cpp, json };
+enum class OutputFormat { kaitai, imhex, cpp, rust, json };
 
 Result<OutputFormat> parse_format(std::string_view text) {
     if (text == "kaitai" || text == "ksy") return OutputFormat::kaitai;
     if (text == "imhex" || text == "hexpat") return OutputFormat::imhex;
     if (text == "cpp" || text == "hpp" || text == "header") return OutputFormat::cpp;
+    if (text == "rust" || text == "rs") return OutputFormat::rust;
     if (text == "json") return OutputFormat::json;
     return make_error(ErrorCode::invalid_argument,
                       "unknown output format: " + std::string(text) +
-                          " (expected kaitai, imhex, cpp or json)");
+                          " (expected kaitai, imhex, cpp, rust or json)");
 }
 
 std::string format_label(OutputFormat format) {
@@ -197,6 +201,7 @@ std::string format_label(OutputFormat format) {
     case OutputFormat::kaitai: return "kaitai";
     case OutputFormat::imhex: return "imhex";
     case OutputFormat::cpp: return "cpp";
+    case OutputFormat::rust: return "rust";
     case OutputFormat::json: return "json";
     }
     return "kaitai";
@@ -366,6 +371,7 @@ Result<std::string> generate_output(const infer::InferenceResult& result, Output
     case OutputFormat::kaitai: return emit::KaitaiEmitter{}.generate(*result.root, options);
     case OutputFormat::imhex: return emit::ImHexEmitter{}.generate(*result.root, options);
     case OutputFormat::cpp: return emit::CppEmitter{}.generate(*result.root, options);
+    case OutputFormat::rust: return emit::RustEmitter{}.generate(*result.root, options);
     case OutputFormat::json: {
         // Handled by the caller; reaching this branch is an internal contract
         // violation rather than a user error.
@@ -574,7 +580,7 @@ std::string command_help(std::string_view command) {
                "Interactive hex/entropy, AST and live emitter dashboard.\n";
     }
     if (command == "infer") {
-        return "Usage: typemorph infer <sample>... [--format=kaitai|imhex|cpp|json] [--out=FILE]\n"
+        return "Usage: typemorph infer <sample>... [--format=kaitai|imhex|cpp|rust|json] [--out=FILE]\n"
                "       [--min-array-elements=N] [--confidence-threshold=F] [--endian=little|big]\n"
                "Infer a format from one or more instances; stdout is the generator output.\n";
     }
@@ -584,7 +590,7 @@ std::string command_help(std::string_view command) {
                "Recover Rust fat pointers, vtables, demangled symbols and tagged-union evidence.\n";
     }
     if (command == "hybrid") {
-        return "Usage: typemorph hybrid <binary> [--section=.rodata] [--format=kaitai|imhex|cpp|json]\n"
+        return "Usage: typemorph hybrid <binary> [--section=.rodata] [--format=kaitai|imhex|cpp|rust|json]\n"
                "       [--out=FILE]\n"
                "Run the format inferrer against an embedded executable section.\n";
     }
@@ -610,6 +616,14 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph sig <binary> [--name=RULE_NAME] [--out=FILE] [--json]\n"
                "Generate a high-fidelity YARA signature rule matching invariants and strings.\n";
     }
+    if (command == "crypto") {
+        return "Usage: typemorph crypto <file> [--json]\n"
+               "Detect cryptographic constants (AES S-boxes, SHA, MD5, ChaCha, CRC, TEA).\n";
+    }
+    if (command == "diff") {
+        return "Usage: typemorph diff <file_a> <file_b> [--json]\n"
+               "Structural and binary diffing: byte changes, section & symbol deltas, entropy shifts.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -625,6 +639,8 @@ std::string command_help(std::string_view command) {
            "  devirt <binary>      Devirtualizer (VM dispatchers & handlers)\n"
            "  entropy <file>       Shannon entropy graph & high-density zones\n"
            "  sig <binary>         Generate YARA rule from invariants & strings\n"
+           "  crypto <file>        Detect cryptographic & hashing constants\n"
+           "  diff <a.bin> <b.bin> Structural & binary diff comparator\n"
            "  serve --stdio        JSON-RPC daemon on stdio\n"
            "  version              Print version\n"
            "  help [command]       Show help\n";
@@ -760,11 +776,17 @@ int command_inspect(const Arguments& args, std::ostream& out, std::ostream& err)
         err << "TypeMorph: " << format_error(cpp.error()) << '\n';
         return 1;
     }
+    auto rust = emit::RustEmitter{}.generate(*result.value().root, options_emit);
+    if (!rust) {
+        err << "TypeMorph: " << format_error(rust.error()) << '\n';
+        return 1;
+    }
 
     if (args.has("json")) {
         JsonValue document = inference_to_json(result.value());
         document["kaitai"] = JsonValue(std::move(kaitai).value());
         document["cpp"] = JsonValue(std::move(cpp).value());
+        document["rust"] = JsonValue(std::move(rust).value());
         out << document.dump(2) << '\n';
         return 0;
     }
@@ -774,6 +796,7 @@ int command_inspect(const Arguments& args, std::ostream& out, std::ostream& err)
     model.root = result.value().root;
     model.kaitai_preview = std::move(kaitai).value();
     model.cpp_preview = std::move(cpp).value();
+    model.rust_preview = std::move(rust).value();
     model.source_name = args.positional.front();
     model.format_name = result.value().format_name;
 
@@ -1511,6 +1534,212 @@ int command_sig(const Arguments& args, std::ostream& out, std::ostream& err) {
     return 0;
 }
 
+int command_crypto(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help")) {
+        out << command_help("crypto");
+        return 0;
+    }
+    if (args.positional.empty()) {
+        err << usage_error("crypto requires a target file") << '\n';
+        return 2;
+    }
+    const std::string& path = args.positional.front();
+    auto view_result = BinaryView::open(path);
+    if (!view_result) {
+        err << "TypeMorph: " << format_error(view_result.error()) << '\n';
+        return 1;
+    }
+    const auto& view = view_result.value();
+    crypto::CryptoScanOptions opts;
+    crypto::CryptoScanner scanner(opts);
+    auto matches = scanner.scan(view);
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(path);
+        doc["size"] = JsonValue(view.size());
+        doc["match_count"] = JsonValue(static_cast<std::uint64_t>(matches.size()));
+        JsonValue array = JsonValue::array();
+        for (const auto& m : matches) {
+            JsonValue entry = JsonValue::object();
+            entry["offset"] = JsonValue(m.offset);
+            entry["size"] = JsonValue(static_cast<std::uint64_t>(m.size));
+            entry["algorithm"] = JsonValue(m.algorithm);
+            entry["role"] = JsonValue(m.role);
+            entry["category"] = JsonValue(std::string(crypto::to_string(m.category)));
+            entry["endianness"] = JsonValue(m.endianness);
+            entry["confidence"] = JsonValue(m.confidence);
+            entry["description"] = JsonValue(m.description);
+            array.push(std::move(entry));
+        }
+        doc["matches"] = std::move(array);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph Cryptographic & Hashing Constant Scanner: " << path << " (" << view.size() << " bytes)\n";
+    if (matches.empty()) {
+        out << "No known cryptographic constants detected.\n";
+        return 0;
+    }
+    out << "Found " << matches.size() << " cryptographic constant(s):\n";
+    out << "--------------------------------------------------------------------------------\n";
+    out << "Offset      Algorithm           Role                      Category   Endian\n";
+    out << "--------------------------------------------------------------------------------\n";
+    for (const auto& m : matches) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "0x%08llx", static_cast<unsigned long long>(m.offset));
+        out << buf << "  "
+            << std::left << std::setw(18) << m.algorithm.substr(0, 18) << "  "
+            << std::setw(24) << m.role.substr(0, 24) << "  "
+            << std::setw(10) << std::string(crypto::to_string(m.category)) << " "
+            << m.endianness << "\n";
+        out << "            -> " << m.description << "\n";
+    }
+    out << "--------------------------------------------------------------------------------\n";
+    return 0;
+}
+
+int command_diff(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help")) {
+        out << command_help("diff");
+        return 0;
+    }
+    if (args.positional.size() < 2) {
+        err << usage_error("diff requires two files (file_a and file_b)") << '\n';
+        return 2;
+    }
+    const std::string& path_a = args.positional[0];
+    const std::string& path_b = args.positional[1];
+    auto view_a = BinaryView::open(path_a);
+    if (!view_a) {
+        err << "TypeMorph: " << format_error(view_a.error()) << '\n';
+        return 1;
+    }
+    auto view_b = BinaryView::open(path_b);
+    if (!view_b) {
+        err << "TypeMorph: " << format_error(view_b.error()) << '\n';
+        return 1;
+    }
+
+    diff::BinaryDiffEngine engine;
+    auto res = engine.compare(view_a.value(), view_b.value(), path_a, path_b);
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["file_a"] = JsonValue(res.file_a);
+        doc["file_b"] = JsonValue(res.file_b);
+        doc["size_a"] = JsonValue(res.size_a);
+        doc["size_b"] = JsonValue(res.size_b);
+        doc["size_delta"] = JsonValue(res.size_delta);
+        doc["entropy_a"] = JsonValue(res.entropy_a);
+        doc["entropy_b"] = JsonValue(res.entropy_b);
+        doc["similarity"] = JsonValue(res.similarity);
+        doc["both_executables"] = JsonValue(res.both_executables);
+        if (res.both_executables) {
+            doc["format_a"] = JsonValue(res.format_a);
+            doc["format_b"] = JsonValue(res.format_b);
+            JsonValue secs = JsonValue::array();
+            for (const auto& s : res.section_diffs) {
+                JsonValue entry = JsonValue::object();
+                entry["name"] = JsonValue(s.name);
+                entry["status"] = JsonValue(s.status);
+                entry["size_a"] = JsonValue(s.size_a);
+                entry["size_b"] = JsonValue(s.size_b);
+                entry["entropy_a"] = JsonValue(s.entropy_a);
+                entry["entropy_b"] = JsonValue(s.entropy_b);
+                secs.push(std::move(entry));
+            }
+            doc["sections"] = std::move(secs);
+
+            JsonValue syms = JsonValue::array();
+            for (const auto& s : res.symbol_diffs) {
+                JsonValue entry = JsonValue::object();
+                entry["name"] = JsonValue(s.name);
+                entry["status"] = JsonValue(s.status);
+                entry["addr_a"] = JsonValue(s.addr_a);
+                entry["addr_b"] = JsonValue(s.addr_b);
+                syms.push(std::move(entry));
+            }
+            doc["symbols"] = std::move(syms);
+        }
+
+        JsonValue ranges = JsonValue::array();
+        for (const auto& r : res.ranges) {
+            JsonValue entry = JsonValue::object();
+            entry["offset_a"] = JsonValue(r.offset_a);
+            entry["size_a"] = JsonValue(r.size_a);
+            entry["offset_b"] = JsonValue(r.offset_b);
+            entry["size_b"] = JsonValue(r.size_b);
+            entry["kind"] = JsonValue(r.kind);
+            ranges.push(std::move(entry));
+        }
+        doc["ranges"] = std::move(ranges);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph Binary & Structural Diff\n"
+        << "  File A: " << res.file_a << " (" << res.size_a << " bytes, entropy "
+        << std::fixed << std::setprecision(2) << res.entropy_a << ")\n"
+        << "  File B: " << res.file_b << " (" << res.size_b << " bytes, entropy "
+        << std::fixed << std::setprecision(2) << res.entropy_b << ")\n"
+        << "  Size Delta: " << (res.size_delta >= 0 ? "+" : "") << res.size_delta << " bytes\n"
+        << "  Similarity: " << std::fixed << std::setprecision(1) << (res.similarity * 100.0) << "%\n";
+
+    if (res.both_executables) {
+        out << "\n[Structural Executable Analysis: " << res.format_a << " vs " << res.format_b << "]\n";
+        out << "Sections:\n";
+        for (const auto& s : res.section_diffs) {
+            out << "  " << std::left << std::setw(10) << s.status << " " << std::setw(16) << s.name
+                << " size: " << s.size_a << " -> " << s.size_b
+                << " (entropy " << std::setprecision(2) << s.entropy_a << " -> " << s.entropy_b << ")\n";
+        }
+        if (!res.symbol_diffs.empty()) {
+            std::size_t shown = 0;
+            out << "Symbols (" << res.symbol_diffs.size() << " changed):\n";
+            for (const auto& s : res.symbol_diffs) {
+                if (s.status == "matched") continue;
+                out << "  " << std::left << std::setw(16) << s.status << " " << s.name;
+                if (s.status == "address_changed") {
+                    char a_buf[64];
+                    std::snprintf(a_buf, sizeof(a_buf), " (0x%llx -> 0x%llx)",
+                                  static_cast<unsigned long long>(s.addr_a),
+                                  static_cast<unsigned long long>(s.addr_b));
+                    out << a_buf;
+                }
+                out << "\n";
+                if (++shown >= 20) {
+                    out << "  ... (" << (res.symbol_diffs.size() - shown) << " more symbols omitted)\n";
+                    break;
+                }
+            }
+        }
+    }
+
+    out << "\n[Byte-level Differences: " << res.ranges.size() << " segment(s)]\n";
+    std::size_t shown_ranges = 0;
+    for (const auto& r : res.ranges) {
+        if (r.kind == "match") continue;
+        char r_buf[128];
+        std::snprintf(r_buf, sizeof(r_buf), "  %-10s A: 0x%06llx (+%lluB) -> B: 0x%06llx (+%lluB)",
+                      r.kind.c_str(),
+                      static_cast<unsigned long long>(r.offset_a),
+                      static_cast<unsigned long long>(r.size_a),
+                      static_cast<unsigned long long>(r.offset_b),
+                      static_cast<unsigned long long>(r.size_b));
+        out << r_buf << "\n";
+        if (++shown_ranges >= 25) {
+            out << "  ... (" << (res.ranges.size() - shown_ranges) << " more ranges omitted)\n";
+            break;
+        }
+    }
+    if (shown_ranges == 0) {
+        out << "  Files are byte-identical.\n";
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -1593,6 +1822,8 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         capabilities.push(JsonValue("devirt"));
         capabilities.push(JsonValue("entropy"));
         capabilities.push(JsonValue("sig"));
+        capabilities.push(JsonValue("crypto"));
+        capabilities.push(JsonValue("diff"));
         result["capabilities"] = std::move(capabilities);
         return result;
     }
@@ -1911,6 +2142,99 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         doc["yara_rule"] = JsonValue(yara.str());
         return doc;
     }
+    if (method == "crypto" || method == "typemorph.crypto") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        const auto& view = view_result.value();
+        crypto::CryptoScanOptions opts;
+        crypto::CryptoScanner scanner(opts);
+        auto matches = scanner.scan(view);
+
+        JsonValue doc = JsonValue::object();
+        doc["file"] = JsonValue(file.value());
+        doc["size"] = JsonValue(view.size());
+        doc["match_count"] = JsonValue(static_cast<std::uint64_t>(matches.size()));
+        JsonValue array = JsonValue::array();
+        for (const auto& m : matches) {
+            JsonValue entry = JsonValue::object();
+            entry["offset"] = JsonValue(m.offset);
+            entry["size"] = JsonValue(static_cast<std::uint64_t>(m.size));
+            entry["algorithm"] = JsonValue(m.algorithm);
+            entry["role"] = JsonValue(m.role);
+            entry["category"] = JsonValue(std::string(crypto::to_string(m.category)));
+            entry["endianness"] = JsonValue(m.endianness);
+            entry["confidence"] = JsonValue(m.confidence);
+            entry["description"] = JsonValue(m.description);
+            array.push(std::move(entry));
+        }
+        doc["matches"] = std::move(array);
+        return doc;
+    }
+    if (method == "diff" || method == "typemorph.diff") {
+        auto file_a = json_string_field(params, "file_a");
+        if (!file_a) return file_a.error();
+        auto file_b = json_string_field(params, "file_b");
+        if (!file_b) return file_b.error();
+        auto view_a = BinaryView::open(file_a.value());
+        if (!view_a) return view_a.error();
+        auto view_b = BinaryView::open(file_b.value());
+        if (!view_b) return view_b.error();
+
+        diff::BinaryDiffEngine engine;
+        auto res = engine.compare(view_a.value(), view_b.value(), file_a.value(), file_b.value());
+
+        JsonValue doc = JsonValue::object();
+        doc["file_a"] = JsonValue(res.file_a);
+        doc["file_b"] = JsonValue(res.file_b);
+        doc["size_a"] = JsonValue(res.size_a);
+        doc["size_b"] = JsonValue(res.size_b);
+        doc["size_delta"] = JsonValue(res.size_delta);
+        doc["entropy_a"] = JsonValue(res.entropy_a);
+        doc["entropy_b"] = JsonValue(res.entropy_b);
+        doc["similarity"] = JsonValue(res.similarity);
+        doc["both_executables"] = JsonValue(res.both_executables);
+        if (res.both_executables) {
+            doc["format_a"] = JsonValue(res.format_a);
+            doc["format_b"] = JsonValue(res.format_b);
+            JsonValue secs = JsonValue::array();
+            for (const auto& s : res.section_diffs) {
+                JsonValue entry = JsonValue::object();
+                entry["name"] = JsonValue(s.name);
+                entry["status"] = JsonValue(s.status);
+                entry["size_a"] = JsonValue(s.size_a);
+                entry["size_b"] = JsonValue(s.size_b);
+                entry["entropy_a"] = JsonValue(s.entropy_a);
+                entry["entropy_b"] = JsonValue(s.entropy_b);
+                secs.push(std::move(entry));
+            }
+            doc["sections"] = std::move(secs);
+
+            JsonValue syms = JsonValue::array();
+            for (const auto& s : res.symbol_diffs) {
+                JsonValue entry = JsonValue::object();
+                entry["name"] = JsonValue(s.name);
+                entry["status"] = JsonValue(s.status);
+                entry["addr_a"] = JsonValue(s.addr_a);
+                entry["addr_b"] = JsonValue(s.addr_b);
+                syms.push(std::move(entry));
+            }
+            doc["symbols"] = std::move(syms);
+        }
+        JsonValue ranges = JsonValue::array();
+        for (const auto& r : res.ranges) {
+            JsonValue entry = JsonValue::object();
+            entry["offset_a"] = JsonValue(r.offset_a);
+            entry["size_a"] = JsonValue(r.size_a);
+            entry["offset_b"] = JsonValue(r.offset_b);
+            entry["size_b"] = JsonValue(r.size_b);
+            entry["kind"] = JsonValue(r.kind);
+            ranges.push(std::move(entry));
+        }
+        doc["ranges"] = std::move(ranges);
+        return doc;
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -2100,6 +2424,26 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_sig(parsed.value(), out_, err_);
+    }
+    if (command == "crypto") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_crypto(parsed.value(), out_, err_);
+    }
+    if (command == "diff") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 2, 2);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_diff(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

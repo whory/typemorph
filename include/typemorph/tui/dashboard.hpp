@@ -22,6 +22,7 @@ struct DashboardModel {
     core::TypePtr root;
     std::string kaitai_preview;
     std::string cpp_preview;
+    std::string rust_preview;
     std::string source_name;
     std::string format_name = "recovered";
 };

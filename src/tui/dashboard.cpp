@@ -561,6 +561,7 @@ std::vector<std::string> help_content() {
         "  Enter          toggle the selected AST node",
         "  e              show the Kaitai preview",
         "  K              show the C++ preview",
+        "  R              show the Rust preview",
         "  ?              toggle this help",
         "  q / Esc        quit",
     };
@@ -1027,6 +1028,12 @@ bool Dashboard::handle_key(int key) {
         sync_preview();
         return true;
     }
+    if (key == 'R') {
+        active_panel_ = 2;
+        preview_.set_active_language("rust");
+        sync_preview();
+        return true;
+    }
     if (key == 's' || key == 'w') {
         save_active_preview();
         return true;
@@ -1233,6 +1240,8 @@ void Dashboard::sync_preview() {
     if (preview_.language() == "cpp" || preview_.language() == "c++" ||
         preview_.language() == "cxx") {
         preview_.set_text(model_.cpp_preview);
+    } else if (preview_.language() == "rust" || preview_.language() == "rs") {
+        preview_.set_text(model_.rust_preview);
     } else {
         preview_.set_text(model_.kaitai_preview);
     }
@@ -1257,6 +1266,8 @@ bool Dashboard::save_active_preview(const std::string& path) {
             target = base + ".hpp";
         } else if (preview_.language() == "imhex" || preview_.language() == "hexpat") {
             target = base + ".hexpat";
+        } else if (preview_.language() == "rust" || preview_.language() == "rs") {
+            target = base + ".rs";
         } else {
             target = base + ".ksy";
         }

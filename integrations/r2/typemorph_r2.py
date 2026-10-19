@@ -158,12 +158,26 @@ class R2Sync:
                 h_va = h.get("handler_va", 0)
                 if h_va:
                     self.cmd(f"f vm.handler.{vm_idx}.op_{hex(opcode)} = {h_va}")
-                    self.cmd(f"CC [TypeMorph VM Opcode {hex(opcode)}] {h.get('mnemonic')} @ {h_va}")
+    def sync_crypto(self) -> None:
+        print(f"[TypeMorph R2] Scanning for crypto constants in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "crypto", self.target_path)
+        if not data:
+            return
+        matches = data.get("matches", [])
+        print(f"[TypeMorph R2] Found {len(matches)} crypto constant(s)...")
+        for m in matches:
+            offset = m.get("offset", 0)
+            algo = m.get("algorithm", "")
+            role = m.get("role", "")
+            desc = m.get("description", "")
+            self.cmd(f"f crypto.{algo}.{role} = {offset}")
+            self.cmd(f'CC [TypeMorph Crypto] "{algo}: {role} ({desc})" @ {offset}')
 
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
+        self.sync_crypto()
         print("[TypeMorph R2] Synchronization complete!")
 
 

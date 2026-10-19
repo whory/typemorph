@@ -38,15 +38,17 @@ Ghidra/IDA/editor integration.
   * **UnXORer**: automated single-byte, multi-byte, and rolling XOR cracking using IC and null-run heuristics.
   * **String Revealer**: extracts ASCII, UTF-16, x86/x64 stack strings (`mov [rbp-X], byte/imm32`), and XOR payloads.
   * **Devirtualizer**: detects VM bytecode interpreters, maps jump tables, and extracts opcode -> handler routines.
-- **Three complete emitters** — Kaitai Struct 0.10 YAML, ImHex pattern language,
-  and compilable C++20 headers, generated from the same recovered AST.
+- **Four complete emitters** — Kaitai Struct 0.10 YAML (`.ksy`), ImHex pattern language (`.hexpat`),
+  compilable C++20 deserialization headers (`.hpp`), and idiomatic Rust structs (`.rs`), generated from the same recovered AST.
+- **Crypto & Hash Constant Scanner** — recognizes AES forward/inverse S-boxes, Rijndael Rcon, SHA-256 / SHA-1 initial states and round constants, MD5 constants, ChaCha20/Salsa20 sigma/tau strings, CRC32 tables, and TEA deltas.
+- **Structural Binary Diffing** — byte-level delta mapping, similarity scoring, and section/symbol comparison for executables.
 - **Full RE Suite Integrations** — out-of-the-box scripts and plugins in `integrations/`:
   * **Ghidra**: `integrations/ghidra/typemorph_sync.py` (Python 3 / Ghidrathon / PyGhidra)
   * **IDA Pro**: `integrations/ida/typemorph_ida.py` (IDAPython for IDA 7.x/8.x/9.x)
   * **Binary Ninja**: `integrations/binaryninja/typemorph_binja.py` (Binja API v3/v4 plugin)
   * **Radare2 / Cutter**: `integrations/r2/typemorph_r2.py` (r2pipe semantic sync script)
-- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `entropy`, `sig`,
-  `serve`) and an ANSI terminal dashboard with hex/entropy heat map, collapsible AST, and live preview.
+- **Two UX modes** — a UNIX-style CLI (`inspect`, `infer`, `rust`, `hybrid`, `unxor`, `strings`, `devirt`, `entropy`, `sig`, `crypto`, `diff`,
+  `serve`) and an ANSI terminal dashboard with hex/entropy heat map, collapsible AST, and live preview (`e` Kaitai, `K` C++, `R` Rust, `s`/`w` save).
 - **Zero required third-party dependencies** — the analysis core, executable
   parser, JSON-RPC, TUI, and test harness are self-contained, so air-gapped RE
   labs and CI can build with nothing but a C++20 compiler. CMake also discovers
@@ -98,15 +100,15 @@ otherwise. The shipped build deliberately works without them:
 ## CLI
 
 ```bash
-# Interactive inspector: hex/entropy + AST + live Kaitai/C++ preview
+# Interactive inspector: hex/entropy + AST + live Kaitai/C++/Rust preview
 typemorph inspect sample_v1.bin
 
 # Headless render (CI-friendly, no terminal needed)
 typemorph inspect sample_v1.bin --render-once --width=140 --height=40
 
-# Multi-sample differential inference
+# Multi-sample differential inference (generates Kaitai, ImHex, C++, or Rust)
 typemorph infer sample_v1.bin sample_v2.bin sample_v3.bin \
-    --format=kaitai --out=output.ksy \
+    --format=rust --out=types.rs \
     --min-array-elements=3 --confidence-threshold=0.85
 
 # Rust semantic recovery
@@ -134,6 +136,12 @@ typemorph entropy sample.bin --block-size=64
 
 # Automated YARA signature rule generator
 typemorph sig sample.bin --name=malware_family --out=rule.yar
+
+# Cryptographic and hashing constant scanner (AES, SHA, MD5, ChaCha, CRC)
+typemorph crypto target.exe
+
+# Structural and binary diff comparator
+typemorph diff sample_v1.bin sample_v2.bin
 
 # JSON-RPC 2.0 daemon (one request per line, for Ghidra/IDA/editor plugins)
 typemorph serve --stdio
@@ -164,11 +172,11 @@ python integrations/r2/typemorph_r2.py path/to/binary
 ```json
 {"jsonrpc":"2.0","id":1,"method":"typemorph.infer","params":{
   "files":["sample_v1.bin","sample_v2.bin","sample_v3.bin"],
-  "format":"kaitai","confidence_threshold":0.85
+  "format":"rust","confidence_threshold":0.85
 }}
 ```
 
-Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `entropy`, `sig`
+Implemented methods: `ping`, `version`, `infer`, `hybrid`, `rust`, `inspect`, `unxor`, `strings`, `devirt`, `entropy`, `sig`, `crypto`, `diff`
 (also namespaced as `typemorph.*`). Notifications (requests without `id`) are
 executed without a reply, per JSON-RPC 2.0.
 

@@ -249,4 +249,38 @@ TEST_CASE("cli: sig generates valid YARA signature") {
     CHECK(parsed.value().find("yara_rule") != nullptr);
 }
 
+TEST_CASE("cli: infer supports --format=rust") {
+    const auto res = invoke({"infer", fixture_path("sample_v1.bin"), fixture_path("sample_v2.bin"), "--format=rust"});
+    CHECK_EQ(res.exit_code, 0);
+    CHECK(res.out.find("pub struct") != std::string::npos);
+    CHECK(res.out.find("#[repr(C)]") != std::string::npos);
+}
+
+TEST_CASE("cli: crypto scans target file and outputs JSON") {
+    const auto text_res = invoke({"crypto", fixture_path("sample_v1.bin")});
+    CHECK_EQ(text_res.exit_code, 0);
+    CHECK(text_res.out.find("Cryptographic & Hashing Constant Scanner") != std::string::npos);
+
+    const auto json_res = invoke({"crypto", fixture_path("sample_v1.bin"), "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("matches") != nullptr);
+}
+
+TEST_CASE("cli: diff compares two binary files") {
+    const auto text_res = invoke({"diff", fixture_path("sample_v1.bin"), fixture_path("sample_v2.bin")});
+    CHECK_EQ(text_res.exit_code, 0);
+    CHECK(text_res.out.find("TypeMorph Binary & Structural Diff") != std::string::npos);
+    CHECK(text_res.out.find("Similarity:") != std::string::npos);
+
+    const auto json_res = invoke({"diff", fixture_path("sample_v1.bin"), fixture_path("sample_v2.bin"), "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("similarity") != nullptr);
+    CHECK(parsed.value().find("ranges") != nullptr);
+}
+
+
 

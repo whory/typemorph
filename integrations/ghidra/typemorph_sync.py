@@ -210,12 +210,29 @@ class GhidraSync:
                         h_addr = toAddr(h_va)
                         name = f"vm_handler_{vm_idx}_op_{hex(opcode)}"
                         createLabel(h_addr, name, True)
-                        setPlateComment(h_addr, f"[TypeMorph VM Opcode {hex(opcode)} ({opcode})]\nMnemonic: {mnemonic}")
+    def sync_crypto(self) -> None:
+        """Runs TypeMorph Crypto scanner and annotates cryptographic constants."""
+        print(f"[TypeMorph Ghidra] Scanning for crypto constants in: {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "crypto", self.target_path)
+        if not data:
+            return
+        matches = data.get("matches", [])
+        print(f"[TypeMorph Ghidra] Found {len(matches)} crypto constant(s)")
+        if IN_GHIDRA:
+            for m in matches:
+                offset = m.get("offset", 0)
+                algo = m.get("algorithm", "")
+                role = m.get("role", "")
+                desc = m.get("description", "")
+                addr = toAddr(offset)
+                createBookmark(addr, "TypeMorph-Crypto", f"{algo} - {role}")
+                setPlateComment(addr, f"[TypeMorph Crypto]\nAlgorithm: {algo} ({role})\nDescription: {desc}")
 
     def run_all(self) -> None:
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()
+        self.sync_crypto()
         print("[TypeMorph Ghidra] Synchronization complete!")
 
 
