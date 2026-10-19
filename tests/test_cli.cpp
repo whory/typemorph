@@ -413,6 +413,13 @@ TEST_CASE("cli: vfs-extract displays help") {
     CHECK(help_res.out.find("Virtual Filesystem") != std::string::npos);
 }
 
+TEST_CASE("cli: vmslayer displays help") {
+    const auto help_res = invoke({"vmslayer", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("VMDragonSlayer") != std::string::npos);
+}
+
+
 
 
 

@@ -42,6 +42,7 @@
 #include "typemorph/vb/vb_analyzer.hpp"
 #include "typemorph/autoit/autoit_decompiler.hpp"
 #include "typemorph/unpack/vfs_extractor.hpp"
+#include "typemorph/vm/vm_analyzer.hpp"
 #ifdef _WIN32
 #include "typemorph/gui/studio_app.hpp"
 #endif
@@ -745,6 +746,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph vfs-extract <binary> [--json]\n"
                "Virtual Filesystem (VFS) Extractor (spoondec / evbunpack): extracts virtual files & registry from Spoon Studio, Enigma Virtual Box, and BoxedApp.\n";
     }
+    if (command == "vmslayer" || command == "novmp" || command == "magicmida") {
+        return "Usage: typemorph vmslayer <binary> [--json]\n"
+               "Advanced Virtualization & VM Handler Profiler (VMDragonSlayer / NoVmp / Magicmida): profiles VM entry points, dispatchers, and classifies VM handlers.\n";
+    }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
                "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
@@ -767,6 +772,7 @@ std::string command_help(std::string_view command) {
            "  vb <binary>          Visual Basic 5.0/6.0 P-Code & Native analyzer (VB Decompiler)\n"
            "  autoit <binary>      AutoIt v3 Script Extractor & token decompiler (Exe2Aut)\n"
            "  vfs-extract <bin>    Virtual Filesystem Extractor (Spoon Studio, Enigma Virtual Box, BoxedApp)\n"
+           "  vmslayer <binary>    Advanced VM Profiler & handler classifier (VMProtect / Themida / NoVmp)\n"
            "  lua <bytecode.luac>  Lua & LuaJIT bytecode decompiler and disassembler (5.1-5.4, LuaJIT 2.x)\n"
            "  aes-recovery <bin>   AES key schedule recovery, master key inversion & White-box T-Boxes\n"
            "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
@@ -4008,6 +4014,61 @@ int command_vfs_extract(const Arguments& args, std::ostream& out, std::ostream& 
     return 0;
 }
 
+int command_vmslayer(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("vmslayer");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph vmslayer: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto rep = vm::VmProfiler::analyze(view.value());
+    if (!rep.is_virtualized) {
+        err << "typemorph vmslayer: no known virtual machine protection artifacts found in " << path << ".\n";
+        return 1;
+    }
+
+    if (args.has("json")) {
+        JsonValue doc = JsonValue::object();
+        doc["is_virtualized"] = JsonValue(rep.is_virtualized);
+        doc["detected_protector"] = JsonValue(rep.detected_protector);
+        doc["vsp_register"] = JsonValue(rep.vsp_register);
+        doc["vip_register"] = JsonValue(rep.vip_register);
+        doc["total_handlers"] = JsonValue(static_cast<std::uint64_t>(rep.total_handlers));
+        JsonValue entries = JsonValue::array();
+        for (const auto& e : rep.vm_entries) {
+            JsonValue entry = JsonValue::object();
+            entry["entry_va"] = JsonValue(e.entry_va);
+            entry["entry_rva"] = JsonValue(e.entry_rva);
+            entry["dispatcher_va"] = JsonValue(e.dispatcher_va);
+            entry["target_vm"] = JsonValue(e.target_vm);
+            JsonValue handlers = JsonValue::array();
+            for (const auto& h : e.identified_handlers) {
+                JsonValue handler = JsonValue::object();
+                handler["type"] = JsonValue(h.type);
+                handler["address"] = JsonValue(h.address);
+                handler["size"] = JsonValue(static_cast<std::uint64_t>(h.size));
+                handler["has_obfuscated_dispatch"] = JsonValue(h.has_obfuscated_dispatch);
+                handlers.push(std::move(handler));
+            }
+            entry["handlers"] = std::move(handlers);
+            entries.push(std::move(entry));
+        }
+        doc["vm_entries"] = std::move(entries);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << vm::VmProfiler::format_report(rep);
+    return 0;
+}
+
+
 
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -4869,6 +4930,41 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         auto rep = classifier.analyze(img_res.value());
         return abi_report_to_json(file.value(), rep);
     }
+    if (method == "vmslayer" || method == "typemorph.vmslayer" ||
+        method == "novmp" || method == "typemorph.novmp") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto rep = vm::VmProfiler::analyze(view_result.value());
+        JsonValue doc = JsonValue::object();
+        doc["is_virtualized"] = JsonValue(rep.is_virtualized);
+        doc["detected_protector"] = JsonValue(rep.detected_protector);
+        doc["vsp_register"] = JsonValue(rep.vsp_register);
+        doc["vip_register"] = JsonValue(rep.vip_register);
+        doc["total_handlers"] = JsonValue(static_cast<std::uint64_t>(rep.total_handlers));
+        JsonValue entries = JsonValue::array();
+        for (const auto& e : rep.vm_entries) {
+            JsonValue entry = JsonValue::object();
+            entry["entry_va"] = JsonValue(e.entry_va);
+            entry["entry_rva"] = JsonValue(e.entry_rva);
+            entry["dispatcher_va"] = JsonValue(e.dispatcher_va);
+            entry["target_vm"] = JsonValue(e.target_vm);
+            JsonValue handlers = JsonValue::array();
+            for (const auto& h : e.identified_handlers) {
+                JsonValue handler = JsonValue::object();
+                handler["type"] = JsonValue(h.type);
+                handler["address"] = JsonValue(h.address);
+                handler["size"] = JsonValue(static_cast<std::uint64_t>(h.size));
+                handler["has_obfuscated_dispatch"] = JsonValue(h.has_obfuscated_dispatch);
+                handlers.push(std::move(handler));
+            }
+            entry["handlers"] = std::move(handlers);
+            entries.push(std::move(entry));
+        }
+        doc["vm_entries"] = std::move(entries);
+        return doc;
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -5318,6 +5414,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_vfs_extract(parsed.value(), out_, err_);
+    }
+    if (command == "vmslayer" || command == "novmp" || command == "magicmida") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_vmslayer(parsed.value(), out_, err_);
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {
