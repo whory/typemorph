@@ -454,9 +454,73 @@ class BinaryNinjaSync:
                             cmt += f" ({fn.get('resolution_type')})"
                         self.bv.set_comment_at(iat_va, cmt)
 
+    def sync_classinformer(self) -> None:
+        """ClassInformer RTTI explorer: discovers classes, vtables and hierarchy in Binary Ninja."""
+        print(f"[TypeMorph Binja] Running ClassInformer on {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "classinformer", self.target_path)
+        if not data:
+            return
+        classes = data.get("classes", [])
+        print(f"[TypeMorph Binja] Discovered {len(classes)} C++ polymorphic classes")
+        if self.bv:
+            for cls in classes:
+                name = cls.get("name", "")
+                vf = cls.get("vftable_va", 0)
+                if vf and name:
+                    sym = Symbol(SymbolType.DataSymbol, vf, f"vftable__{name.replace('::', '__')}")
+                    self.bv.define_auto_symbol(sym)
+                    cmt = f"Class: {name}"
+                    bases = cls.get("base_classes", [])
+                    if bases:
+                        cmt += " : " + ", ".join(b.get("name", "") for b in bases)
+                    self.bv.set_comment_at(vf, cmt)
+
+    def sync_sigmake(self) -> None:
+        """Signature Maker: generates byte signatures for functions."""
+        print(f"[TypeMorph Binja] Generating signatures (SigMaker): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "sigmake", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        print(f"[TypeMorph Binja] Generated {len(sigs)} function signature(s)")
+        if self.bv:
+            for s in sigs:
+                va = s.get("function_va", 0)
+                pat = s.get("pattern_ida", "")
+                if va and pat:
+                    self.bv.set_comment_at(va, f"SigMaker: {pat}")
+
+    def sync_applycalletype(self) -> None:
+        """ApplyCalleeType: cross-references call sites and propagates prototype types."""
+        print(f"[TypeMorph Binja] Applying callee types (ApplyCalleeType): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "applycalletype", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        print(f"[TypeMorph Binja] Propagating {len(sigs)} callee prototype(s)")
+        if self.bv:
+            for sig in sigs:
+                va = sig.get("entry_va", 0)
+                proto = sig.get("prototype", "")
+                if va and proto:
+                    self.bv.set_comment_at(va, f"Prototype: {proto}")
+
+    def sync_dumpsubs(self) -> None:
+        """Dump Subroutines: logs all classified subroutines and prototypes."""
+        print(f"[TypeMorph Binja] Listing subroutines (DumpSubs): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "dumpsubs", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        print(f"[TypeMorph Binja] Dumped {len(sigs)} subroutine prototype(s)")
+
     def run_all(self) -> None:
         self.sync_detect()
         self.sync_fixiat()
+        self.sync_classinformer()
+        self.sync_sigmake()
+        self.sync_applycalletype()
+        self.sync_dumpsubs()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()

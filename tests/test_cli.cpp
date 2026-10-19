@@ -294,5 +294,58 @@ TEST_CASE("cli: cff analyzes target file and outputs JSON and text") {
     CHECK(parsed.value().find("functions") != nullptr);
 }
 
+TEST_CASE("cli: classinformer discovers classes and emits reports") {
+    const auto text_res = invoke({"classinformer", fixture_path("rust_sample.elf")});
+    CHECK_EQ(text_res.exit_code, 0);
+    CHECK(text_res.out.find("ClassInformer") != std::string::npos);
+
+    const auto json_res = invoke({"classinformer", fixture_path("rust_sample.elf"), "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("classes") != nullptr);
+}
+
+TEST_CASE("cli: sigmake generates signature patterns") {
+    const auto text_res = invoke({"sigmake", fixture_path("rust_sample.elf")});
+    CHECK_EQ(text_res.exit_code, 0);
+    CHECK(text_res.out.find("Signature Maker") != std::string::npos);
+
+    const auto yara_res = invoke({"sigmake", fixture_path("rust_sample.elf"), "--format=yara"});
+    CHECK_EQ(yara_res.exit_code, 0);
+    CHECK(yara_res.out.find("YARA") != std::string::npos);
+
+    const auto json_res = invoke({"sigmake", fixture_path("rust_sample.elf"), "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("signatures") != nullptr);
+}
+
+TEST_CASE("cli: applycalletype analyzes callee prototypes") {
+    const auto text_res = invoke({"applycalletype", fixture_path("rust_sample.elf")});
+    CHECK_EQ(text_res.exit_code, 0);
+    CHECK(text_res.out.find("ApplyCalleeType") != std::string::npos);
+
+    const auto json_res = invoke({"applycalletype", fixture_path("rust_sample.elf"), "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("signatures") != nullptr);
+}
+
+TEST_CASE("cli: dumpsubs dumps subroutines to CSV and JSON") {
+    const auto csv_res = invoke({"dumpsubs", fixture_path("rust_sample.elf")});
+    CHECK_EQ(csv_res.exit_code, 0);
+    CHECK(csv_res.out.find("Address,Name,Convention") != std::string::npos);
+
+    const auto json_res = invoke({"dumpsubs", fixture_path("rust_sample.elf"), "--json"});
+    CHECK_EQ(json_res.exit_code, 0);
+    auto parsed = parse_json(json_res.out);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().find("signatures") != nullptr);
+}
+
+
 
 

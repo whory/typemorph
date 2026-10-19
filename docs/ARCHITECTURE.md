@@ -163,6 +163,21 @@ Confidence is a product of independent evidence; the CLI's
    - Traces obfuscated import redirection stubs (`jmp [rel32/abs64]`, `jmp imm`, `push imm; ret`, `mov rax/eax, imm; jmp/push-ret`).
    - Resolves target addresses against internal Windows API database (`KERNEL32`, `ntdll`, `USER32`, `ADVAPI32`, `WS2_32`).
    - Injects a fresh section (`.typem`), builds valid `IMAGE_IMPORT_DESCRIPTOR` arrays, OriginalFirstThunk (INT), FirstThunk (IAT), and hint/name strings, updating PE data directories and headers (`typemorph fixiat`).
+22. **ClassInformer C++ RTTI & Polymorphic Hierarchy Explorer (`typemorph classinformer`)**:
+   - ClassInformer-style discovery of MSVC and Itanium C++ polymorphic class structures.
+   - Parses RTTICompleteObjectLocator, TypeDescriptor, ClassHierarchyDescriptor, and BaseClassArray tables.
+   - Emits class hierarchy trees, virtual method table slots, and exportable C++ header structures (`--format=cpp`, `--format=csv`).
+23. **Signature Maker Engine (`typemorph sigmake` / `sigmaker`)**:
+   - Generates resilient opcode patterns for subroutines and entry points.
+   - Automatically masks relocation offsets (call/jmp rel32) and RIP-relative memory displacement operands into `??` wildcards.
+   - Formats outputs in IDA Pro pattern format (`55 8B EC ?? ??`), YARA hex rules, C byte arrays (`\x55\x8B\xEC`), and string masks (`xxx??`).
+24. **ApplyCalleeType Call Site & Prototype Propagator (`typemorph applycalletype`)**:
+   - Analyzes subroutine call sites, matches argument registers and stack footprints, and classifies callee prototypes.
+   - Propagates recovered C function signatures, calling conventions, and parameter types into disassemblers.
+25. **Subroutine Dumper (`typemorph dumpsubs`)**:
+   - Disassembles and classifies all binary subroutines into structured CSV or JSON inventories.
+   - Captures entry VAs, sizes, names, calling conventions, stack purge counts, and full C prototypes.
+
 
 
 ## Emitters

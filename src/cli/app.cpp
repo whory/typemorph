@@ -686,6 +686,22 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph fixiat <dump.exe> [--out=fixed.exe] [--section=.typem] [--no-trace] [--json]\n"
                "Reconstruct corrupted/dumped PE Import Address Tables (IAT), trace stubs, and rebuild PE import directory.\n";
     }
+    if (command == "classinformer" || command == "classes") {
+        return "Usage: typemorph classinformer <binary> [--format=cpp|csv|json] [--json]\n"
+               "ClassInformer RTTI explorer: discovers MSVC/Itanium C++ polymorphic classes, CompleteObjectLocators, vftables, and class hierarchies.\n";
+    }
+    if (command == "sigmake" || command == "sigmaker") {
+        return "Usage: typemorph sigmake <binary> [--function=VA] [--format=ida|yara|byte|json] [--min-len=N] [--json]\n"
+               "Signature Maker: generates robust byte patterns with wildcards ('??') across relocations and immediate offsets for subroutines.\n";
+    }
+    if (command == "applycalletype" || command == "applycalletypeex") {
+        return "Usage: typemorph applycalletype <binary> [--function=VA] [--apply-ida] [--json]\n"
+               "ApplyCalleeType: resolves call sites, matches callee prototypes and calling conventions, and propagates argument types.\n";
+    }
+    if (command == "dumpsubs" || command == "subsdump") {
+        return "Usage: typemorph dumpsubs <binary> [--out=subs.csv] [--min-size=N] [--json]\n"
+               "Dump Subroutines: extracts all function addresses, sizes, names, calling conventions, and prototypes into CSV/JSON.\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -711,6 +727,10 @@ std::string command_help(std::string_view command) {
            "  rich <binary>        Decode MSVC Rich Header & compiler telemetry\n"
            "  checksec <binary>    Inspect binary hardening, packers & anomalies\n"
            "  abi <binary>         Classify calling conventions & recover C prototypes\n"
+           "  classinformer <bin>  ClassInformer: RTTI class explorer, vftables & inheritance trees\n"
+           "  sigmake <binary>     Signature Maker: generate IDA / YARA byte patterns with '??' wildcards\n"
+           "  applycalletype <bin> ApplyCalleeType: cross-reference call sites & propagate callee prototypes\n"
+           "  dumpsubs <binary>    Dump all subroutines, VAs, sizes, calling conventions to CSV/JSON\n"
            "  entropy <file>       Shannon entropy graph & high-density zones\n"
            "  sig <binary>         Generate YARA rule from invariants & strings\n"
            "  crypto <file>        Detect cryptographic & hashing constants\n"
@@ -3145,6 +3165,455 @@ int command_fixiat(const Arguments& args, std::ostream& out, std::ostream& err) 
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// ClassInformer, SigMaker, ApplyCalleeType, DumpSubs
+// ---------------------------------------------------------------------------
+
+JsonValue classinformer_to_json(const std::string& path, const std::vector<rtti::RttiClass>& classes) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["count"] = JsonValue(static_cast<std::uint64_t>(classes.size()));
+
+    JsonValue list = JsonValue::array();
+    for (const auto& cls : classes) {
+        JsonValue item = JsonValue::object();
+        item["name"] = JsonValue(cls.name);
+        item["mangled_name"] = JsonValue(cls.mangled_name);
+        item["vftable_va"] = JsonValue(cls.vftable_va);
+        item["locator_va"] = JsonValue(cls.locator_va);
+        item["confidence"] = JsonValue(cls.confidence);
+
+        JsonValue bases = JsonValue::array();
+        for (const auto& b : cls.base_classes) {
+            JsonValue b_obj = JsonValue::object();
+            b_obj["name"] = JsonValue(b.name);
+            b_obj["offset"] = JsonValue(static_cast<std::int64_t>(b.offset));
+            bases.push(std::move(b_obj));
+        }
+        item["base_classes"] = std::move(bases);
+
+        JsonValue methods = JsonValue::array();
+        for (const auto& m : cls.methods) {
+            JsonValue m_obj = JsonValue::object();
+            m_obj["slot"] = JsonValue(static_cast<std::uint64_t>(m.slot));
+            m_obj["virtual_address"] = JsonValue(m.virtual_address);
+            m_obj["name"] = JsonValue(m.name);
+            methods.push(std::move(m_obj));
+        }
+        item["methods"] = std::move(methods);
+        list.push(std::move(item));
+    }
+    doc["classes"] = std::move(list);
+    return doc;
+}
+
+int command_classinformer(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("classinformer");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph classinformer: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    rtti::RttiAnalyzer analyzer;
+    auto classes = analyzer.analyze_view(view.value());
+
+    std::string fmt = args.get_or("format", "");
+    if (args.has("json") || fmt == "json") {
+        auto doc = classinformer_to_json(path, classes);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    if (fmt == "cpp") {
+        out << rtti::RttiAnalyzer::to_cpp_header(classes) << '\n';
+        return 0;
+    }
+
+    if (fmt == "csv") {
+        out << "Class,VftableVA,LocatorVA,BaseCount,MethodCount,Bases\n";
+        for (const auto& cls : classes) {
+            char vf_buf[32], loc_buf[32];
+            std::snprintf(vf_buf, sizeof(vf_buf), "0x%llX", static_cast<unsigned long long>(cls.vftable_va));
+            std::snprintf(loc_buf, sizeof(loc_buf), "0x%llX", static_cast<unsigned long long>(cls.locator_va));
+            out << "\"" << cls.name << "\"," << vf_buf << "," << loc_buf << ","
+                << cls.base_classes.size() << "," << cls.methods.size() << ",\"";
+            for (std::size_t b = 0; b < cls.base_classes.size(); ++b) {
+                if (b > 0) out << " -> ";
+                out << cls.base_classes[b].name;
+            }
+            out << "\"\n";
+        }
+        return 0;
+    }
+
+    out << "TypeMorph ClassInformer - C++ RTTI & Polymorphic Hierarchy\n"
+        << "===========================================================\n"
+        << "Target: " << path << "\n"
+        << "Found " << classes.size() << " polymorphic C++ class(es):\n\n";
+
+    if (classes.empty()) {
+        out << "  No C++ RTTI / vftables found in binary.\n";
+        return 0;
+    }
+
+    for (std::size_t i = 0; i < classes.size(); ++i) {
+        const auto& cls = classes[i];
+        char vf_buf[32], loc_buf[32];
+        std::snprintf(vf_buf, sizeof(vf_buf), "0x%llX", static_cast<unsigned long long>(cls.vftable_va));
+        std::snprintf(loc_buf, sizeof(loc_buf), "0x%llX", static_cast<unsigned long long>(cls.locator_va));
+
+        out << "  [" << (i + 1) << "] class " << cls.name;
+        if (!cls.base_classes.empty()) {
+            out << " : ";
+            for (std::size_t b = 0; b < cls.base_classes.size(); ++b) {
+                if (b > 0) out << ", ";
+                out << "public " << cls.base_classes[b].name;
+            }
+        }
+        out << "\n      Vftable: " << vf_buf << " | Locator: " << loc_buf
+            << " | Methods: " << cls.methods.size() << "\n";
+
+        if (!cls.base_classes.empty()) {
+            out << "      Hierarchy: ";
+            for (std::size_t b = 0; b < cls.base_classes.size(); ++b) {
+                if (b > 0) out << " -> ";
+                out << cls.base_classes[b].name << " (+0x" << std::hex << cls.base_classes[b].offset << std::dec << ")";
+            }
+            out << "\n";
+        }
+        if (!cls.methods.empty()) {
+            std::size_t limit = std::min<std::size_t>(cls.methods.size(), 8);
+            for (std::size_t m = 0; m < limit; ++m) {
+                char m_buf[32];
+                std::snprintf(m_buf, sizeof(m_buf), "0x%llX", static_cast<unsigned long long>(cls.methods[m].virtual_address));
+                out << "        slot[" << cls.methods[m].slot << "] " << m_buf << ": " << cls.methods[m].name << "()\n";
+            }
+            if (cls.methods.size() > limit) {
+                out << "        ... and " << (cls.methods.size() - limit) << " more virtual slots\n";
+            }
+        }
+        out << "\n";
+    }
+
+    return 0;
+}
+
+struct GeneratedSignature {
+    std::uint64_t function_va = 0;
+    std::string function_name;
+    std::size_t length = 0;
+    std::string pattern_ida;    // "55 8B EC 83 EC ?? 53"
+    std::string pattern_yara;   // "{ 55 8b ec 83 ec ?? 53 }"
+    std::string pattern_bytes;  // "\x55\x8B\xEC\x83\xEC\x00\x53"
+    std::string pattern_mask;   // "xxxxx?x"
+    std::size_t wildcard_count = 0;
+    bool is_unique = true;
+};
+
+JsonValue sigmake_to_json(const std::string& path, const std::vector<GeneratedSignature>& sigs) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["count"] = JsonValue(static_cast<std::uint64_t>(sigs.size()));
+    JsonValue arr = JsonValue::array();
+    for (const auto& s : sigs) {
+        JsonValue item = JsonValue::object();
+        item["function_va"] = JsonValue(s.function_va);
+        item["name"] = JsonValue(s.function_name);
+        item["length"] = JsonValue(static_cast<std::uint64_t>(s.length));
+        item["pattern_ida"] = JsonValue(s.pattern_ida);
+        item["pattern_yara"] = JsonValue(s.pattern_yara);
+        item["pattern_bytes"] = JsonValue(s.pattern_bytes);
+        item["pattern_mask"] = JsonValue(s.pattern_mask);
+        item["wildcards"] = JsonValue(static_cast<std::uint64_t>(s.wildcard_count));
+        item["is_unique"] = JsonValue(s.is_unique);
+        arr.push(std::move(item));
+    }
+    doc["signatures"] = std::move(arr);
+    return doc;
+}
+
+GeneratedSignature make_func_signature(const core::ExecutableImage& image,
+                                       const core::BinaryView& view,
+                                       std::uint64_t func_va,
+                                       std::string func_name,
+                                       std::size_t desired_len) {
+    GeneratedSignature sig;
+    sig.function_va = func_va;
+    sig.function_name = std::move(func_name);
+
+    auto off_res = image.va_to_offset(func_va);
+    if (!off_res || off_res.value() >= view.size()) return sig;
+
+    const std::uint64_t file_off = off_res.value();
+    const std::size_t max_avail = static_cast<std::size_t>(view.size() - file_off);
+    const std::size_t len = std::min<std::size_t>(desired_len, max_avail);
+    sig.length = len;
+
+    const std::uint8_t* bytes = view.data() + file_off;
+    std::ostringstream ida_ss, yara_ss, bytes_ss, mask_ss;
+    yara_ss << "{ ";
+
+    for (std::size_t i = 0; i < len; ++i) {
+        bool wildcard = false;
+
+        // Heuristic masking: call/jmp rel32 offsets (E8 xx xx xx xx, E9 xx xx xx xx)
+        if (i >= 1 && (bytes[i - 1] == 0xE8 || bytes[i - 1] == 0xE9) && i + 3 <= len) {
+            wildcard = true;
+        } else if (i >= 2 && i <= len && (bytes[i - 2] == 0xE8 || bytes[i - 2] == 0xE9)) {
+            wildcard = true;
+        } else if (i >= 3 && i <= len && (bytes[i - 3] == 0xE8 || bytes[i - 3] == 0xE9)) {
+            wildcard = true;
+        } else if (i >= 4 && i <= len && (bytes[i - 4] == 0xE8 || bytes[i - 4] == 0xE9)) {
+            wildcard = true;
+        }
+        // RIP-relative memory disp32: 48 8B / 48 8D / FF 15 / FF 25
+        if (image.bits() == 64 && i >= 3 && i + 1 <= len) {
+            if (bytes[i - 3] == 0x48 && (bytes[i - 2] == 0x8B || bytes[i - 2] == 0x8D) && (bytes[i - 1] & 0xC7) == 0x05) {
+                wildcard = true;
+            }
+        }
+
+        if (wildcard) {
+            ++sig.wildcard_count;
+            if (i > 0) ida_ss << " ";
+            ida_ss << "??";
+            yara_ss << "?? ";
+            bytes_ss << "\\x00";
+            mask_ss << "?";
+        } else {
+            char hex_byte[8];
+            std::snprintf(hex_byte, sizeof(hex_byte), "%02X", bytes[i]);
+            if (i > 0) ida_ss << " ";
+            ida_ss << hex_byte;
+            std::snprintf(hex_byte, sizeof(hex_byte), "%02x ", bytes[i]);
+            yara_ss << hex_byte;
+            std::snprintf(hex_byte, sizeof(hex_byte), "\\x%02X", bytes[i]);
+            bytes_ss << hex_byte;
+            mask_ss << "x";
+        }
+    }
+    yara_ss << "}";
+
+    sig.pattern_ida = ida_ss.str();
+    sig.pattern_yara = yara_ss.str();
+    sig.pattern_bytes = bytes_ss.str();
+    sig.pattern_mask = mask_ss.str();
+    return sig;
+}
+
+int command_sigmake(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("sigmake");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph sigmake: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto img_res = core::ExecutableImage::parse(view.value());
+    if (!img_res) {
+        err << "typemorph sigmake: " << format_error(img_res.error()) << '\n';
+        return 1;
+    }
+    const auto& image = img_res.value();
+
+    std::size_t min_len = 32;
+    if (auto len_opt = args.get("min-len")) {
+        auto val = parse_u64(*len_opt, "min-len");
+        if (val) min_len = static_cast<std::size_t>(*val);
+    }
+
+    std::vector<GeneratedSignature> sigs;
+
+    if (auto fn_str = args.get("function")) {
+        std::optional<std::uint64_t> target_va;
+        auto val = parse_u64(*fn_str, "function");
+        if (!val) {
+            std::string_view sv = *fn_str;
+            if (sv.starts_with("0x") || sv.starts_with("0X")) sv.remove_prefix(2);
+            char* end_ptr = nullptr;
+            std::string clean(sv);
+            std::uint64_t hex_va = std::strtoull(clean.c_str(), &end_ptr, 16);
+            if (end_ptr != clean.c_str() && *end_ptr == '\0') target_va = hex_va;
+        } else {
+            target_va = *val;
+        }
+
+        if (!target_va) {
+            err << "typemorph sigmake: invalid function address " << *fn_str << '\n';
+            return 1;
+        }
+
+        char name_buf[64];
+        std::snprintf(name_buf, sizeof(name_buf), "sub_%llX", static_cast<unsigned long long>(*target_va));
+        sigs.push_back(make_func_signature(image, view.value(), *target_va, name_buf, min_len));
+    } else {
+        // Run ABI classifier to identify all function entry points
+        abi::AbiClassifier classifier;
+        auto abi_rep = classifier.analyze(image);
+        std::size_t limit = std::min<std::size_t>(abi_rep.signatures.size(), 20);
+        for (std::size_t i = 0; i < limit; ++i) {
+            const auto& fn = abi_rep.signatures[i];
+            sigs.push_back(make_func_signature(image, view.value(), fn.entry_va, fn.name, min_len));
+        }
+    }
+
+    std::string fmt = args.get_or("format", "ida");
+    if (args.has("json") || fmt == "json") {
+        auto doc = sigmake_to_json(path, sigs);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph Signature Maker (SigMaker)\n"
+        << "====================================\n"
+        << "Target: " << path << "\n"
+        << "Generated " << sigs.size() << " signature pattern(s):\n\n";
+
+    for (const auto& s : sigs) {
+        char va_buf[32];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llX", static_cast<unsigned long long>(s.function_va));
+        out << "Function: " << s.function_name << " (" << va_buf << ", len: " << s.length
+            << ", wildcards: " << s.wildcard_count << ")\n";
+
+        if (fmt == "yara") {
+            out << "  YARA  : " << s.pattern_yara << "\n\n";
+        } else if (fmt == "byte" || fmt == "c") {
+            out << "  Bytes : \"" << s.pattern_bytes << "\"\n";
+            out << "  Mask  : \"" << s.pattern_mask << "\"\n\n";
+        } else {
+            out << "  IDA   : " << s.pattern_ida << "\n\n";
+        }
+    }
+
+    return 0;
+}
+
+int command_applycalletype(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("applycalletype");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph applycalletype: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto img_res = core::ExecutableImage::parse(view.value());
+    if (!img_res) {
+        err << "typemorph applycalletype: " << format_error(img_res.error()) << '\n';
+        return 1;
+    }
+
+    abi::AbiClassifier classifier;
+    auto rep = classifier.analyze(img_res.value());
+
+    if (args.has("json")) {
+        auto doc = abi_report_to_json(path, rep);
+        doc["tool"] = JsonValue("applycalletype");
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << "TypeMorph ApplyCalleeType - Call Site Type & Prototype Propagator\n"
+        << "================================================================\n"
+        << "Target: " << path << "\n"
+        << "Classified " << rep.signatures.size() << " callee signature(s) across "
+        << rep.total_functions << " analyzed functions:\n\n";
+
+    for (const auto& sig : rep.signatures) {
+        char va_buf[32];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llX", static_cast<unsigned long long>(sig.entry_va));
+        out << "  [" << va_buf << "] " << sig.prototype << "\n"
+            << "     Convention: " << to_string(sig.convention)
+            << " | Arguments: " << sig.arguments.size()
+            << " | Frame: " << sig.stack_frame_size << "B";
+        if (sig.stack_purge_bytes > 0) out << " | Purge: " << sig.stack_purge_bytes << "B";
+        out << "\n";
+        for (const auto& arg : sig.arguments) {
+            out << "       arg[" << arg.index << "] " << arg.location << " (" << arg.type_hint << ")\n";
+        }
+        out << "\n";
+    }
+
+    out << "(Status: Ready to propagate to IDA / Ghidra / Binary Ninja via typemorph_sync)\n";
+    return 0;
+}
+
+int command_dumpsubs(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("dumpsubs");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph dumpsubs: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    auto img_res = core::ExecutableImage::parse(view.value());
+    if (!img_res) {
+        err << "typemorph dumpsubs: " << format_error(img_res.error()) << '\n';
+        return 1;
+    }
+
+    abi::AbiClassifier classifier;
+    auto rep = classifier.analyze(img_res.value());
+
+    std::size_t min_size = 0;
+    if (auto ms_opt = args.get("min-size")) {
+        auto val = parse_u64(*ms_opt, "min-size");
+        if (val) min_size = static_cast<std::size_t>(*val);
+    }
+
+    if (args.has("json")) {
+        auto doc = abi_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    std::ostringstream csv;
+    csv << "Address,Name,Convention,ReturnType,StackFrame,StackPurge,Arguments,Prototype\n";
+    for (const auto& sig : rep.signatures) {
+        if (sig.stack_frame_size < min_size) continue;
+        char va_buf[32];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llX", static_cast<unsigned long long>(sig.entry_va));
+        csv << va_buf << ",\"" << sig.name << "\"," << to_string(sig.convention) << ",\""
+            << sig.return_type_hint << "\"," << sig.stack_frame_size << ","
+            << sig.stack_purge_bytes << "," << sig.arguments.size() << ",\""
+            << sig.prototype << "\"\n";
+    }
+
+    if (auto out_path = args.get("out")) {
+        auto wr = write_file(*out_path, csv.str());
+        if (!wr) {
+            err << "typemorph dumpsubs: failed to write: " << *out_path << '\n';
+            return 1;
+        }
+        out << "Subroutines dumped successfully to: " << *out_path << "\n";
+        return 0;
+    }
+
+    out << csv.str();
+    return 0;
+}
+
+
 
 // ---------------------------------------------------------------------------
 // JSON-RPC
@@ -3898,6 +4367,77 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         auto rep = reconstructor.analyze(view_result.value());
         return fixiat_report_to_json(file.value(), rep);
     }
+    if (method == "classinformer" || method == "typemorph.classinformer" ||
+        method == "classes" || method == "typemorph.classes") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        rtti::RttiAnalyzer analyzer;
+        auto classes = analyzer.analyze_view(view_result.value());
+        auto doc = classinformer_to_json(file.value(), classes);
+        auto fmt = json_string_field(params, "format", false).value_or("");
+        if (fmt == "cpp") {
+            doc["cpp_header"] = JsonValue(rtti::RttiAnalyzer::to_cpp_header(classes));
+        }
+        return doc;
+    }
+    if (method == "sigmake" || method == "typemorph.sigmake" ||
+        method == "sigmaker" || method == "typemorph.sigmaker") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto img_res = core::ExecutableImage::parse(view_result.value());
+        if (!img_res) return img_res.error();
+        std::size_t min_len = 32;
+        if (const auto* ml = params.find("min_len")) {
+            if (ml->as_int()) min_len = static_cast<std::size_t>(*ml->as_int());
+        }
+        std::vector<GeneratedSignature> sigs;
+        const auto* fn_val = params.find("function");
+        if (fn_val && fn_val->as_int()) {
+            std::uint64_t target_va = static_cast<std::uint64_t>(*fn_val->as_int());
+            char name_buf[64];
+            std::snprintf(name_buf, sizeof(name_buf), "sub_%llX", static_cast<unsigned long long>(target_va));
+            sigs.push_back(make_func_signature(img_res.value(), view_result.value(), target_va, name_buf, min_len));
+        } else {
+            abi::AbiClassifier classifier;
+            auto abi_rep = classifier.analyze(img_res.value());
+            std::size_t limit = std::min<std::size_t>(abi_rep.signatures.size(), 20);
+            for (std::size_t i = 0; i < limit; ++i) {
+                const auto& fn = abi_rep.signatures[i];
+                sigs.push_back(make_func_signature(img_res.value(), view_result.value(), fn.entry_va, fn.name, min_len));
+            }
+        }
+        return sigmake_to_json(file.value(), sigs);
+    }
+    if (method == "applycalletype" || method == "typemorph.applycalletype" ||
+        method == "applycalletypeex" || method == "typemorph.applycalletypeex") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto img_res = core::ExecutableImage::parse(view_result.value());
+        if (!img_res) return img_res.error();
+        abi::AbiClassifier classifier;
+        auto rep = classifier.analyze(img_res.value());
+        auto doc = abi_report_to_json(file.value(), rep);
+        doc["tool"] = JsonValue("applycalletype");
+        return doc;
+    }
+    if (method == "dumpsubs" || method == "typemorph.dumpsubs" ||
+        method == "subsdump" || method == "typemorph.subsdump") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        auto img_res = core::ExecutableImage::parse(view_result.value());
+        if (!img_res) return img_res.error();
+        abi::AbiClassifier classifier;
+        auto rep = classifier.analyze(img_res.value());
+        return abi_report_to_json(file.value(), rep);
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -4227,6 +4767,46 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_fixiat(parsed.value(), out_, err_);
+    }
+    if (command == "classinformer" || command == "classes") {
+        auto parsed = parse_arguments(
+            rest, {"format"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_classinformer(parsed.value(), out_, err_);
+    }
+    if (command == "sigmake" || command == "sigmaker") {
+        auto parsed = parse_arguments(
+            rest, {"function", "format", "min-len"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_sigmake(parsed.value(), out_, err_);
+    }
+    if (command == "applycalletype" || command == "applycalletypeex") {
+        auto parsed = parse_arguments(
+            rest, {"function"},
+            {"apply-ida"}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_applycalletype(parsed.value(), out_, err_);
+    }
+    if (command == "dumpsubs" || command == "subsdump") {
+        auto parsed = parse_arguments(
+            rest, {"out", "min-size"},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_dumpsubs(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

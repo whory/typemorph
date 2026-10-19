@@ -382,9 +382,65 @@ class R2Sync:
                     self.cmd(f"f sym.imp.{mod_name}_{fn_name} = {iat_va}")
                     self.cmd(f'CC "Import: {mod_name}!{fn_name}" @ {iat_va}')
 
+    def sync_classinformer(self) -> None:
+        """ClassInformer RTTI explorer: discovers classes, vtables and hierarchy in Radare2."""
+        print(f"[TypeMorph R2] Running ClassInformer on {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "classinformer", self.target_path)
+        if not data:
+            return
+        classes = data.get("classes", [])
+        print(f"[TypeMorph R2] Discovered {len(classes)} C++ polymorphic classes")
+        for cls in classes:
+            name = cls.get("name", "")
+            vf = cls.get("vftable_va", 0)
+            if vf and name:
+                self.cmd(f"f vftable.{name} = {vf}")
+                self.cmd(f'CC "Class: {name}" @ {vf}')
+
+    def sync_sigmake(self) -> None:
+        """Signature Maker: generates byte signatures for functions."""
+        print(f"[TypeMorph R2] Generating signatures (SigMaker): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "sigmake", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        print(f"[TypeMorph R2] Generated {len(sigs)} function signature(s)")
+        for s in sigs:
+            va = s.get("function_va", 0)
+            pat = s.get("pattern_ida", "")
+            if va and pat:
+                self.cmd(f'CC "SigMaker: {pat}" @ {va}')
+
+    def sync_applycalletype(self) -> None:
+        """ApplyCalleeType: cross-references call sites and propagates prototype types."""
+        print(f"[TypeMorph R2] Applying callee types (ApplyCalleeType): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "applycalletype", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        print(f"[TypeMorph R2] Propagating {len(sigs)} callee prototype(s)")
+        for sig in sigs:
+            va = sig.get("entry_va", 0)
+            proto = sig.get("prototype", "")
+            if va and proto:
+                self.cmd(f'CC "Prototype: {proto}" @ {va}')
+
+    def sync_dumpsubs(self) -> None:
+        """Dump Subroutines: logs all classified subroutines and prototypes."""
+        print(f"[TypeMorph R2] Listing subroutines (DumpSubs): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "dumpsubs", self.target_path)
+        if not data:
+            return
+        sigs = data.get("signatures", [])
+        print(f"[TypeMorph R2] Dumped {len(sigs)} subroutine prototype(s)")
+
     def run_all(self) -> None:
         self.sync_detect()
         self.sync_fixiat()
+        self.sync_classinformer()
+        self.sync_sigmake()
+        self.sync_applycalletype()
+        self.sync_dumpsubs()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()

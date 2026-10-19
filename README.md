@@ -180,6 +180,21 @@ typemorph detect target.exe --json
 typemorph fixiat dump.exe
 typemorph fixiat dump.exe --out=fixed.exe --section=.typem
 
+# ClassInformer: C++ RTTI class explorer, CompleteObjectLocators, vftables & inheritance trees
+typemorph classinformer target.exe
+typemorph classinformer target.exe --format=cpp
+typemorph classinformer target.exe --format=csv
+
+# Signature Maker: generate IDA / YARA byte patterns with wildcards ('??')
+typemorph sigmake target.exe --function=0x140001000 --format=ida
+typemorph sigmake target.exe --format=yara
+
+# ApplyCalleeType: resolve call sites & cross-reference callee prototypes
+typemorph applycalletype target.exe
+
+# Dump Subroutines: export all functions, calling conventions, stack frames to CSV/JSON
+typemorph dumpsubs target.exe --out=functions.csv --min-size=16
+
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe
 
