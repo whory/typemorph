@@ -37,6 +37,9 @@
 #include "typemorph/detect/detect_engine.hpp"
 #include "typemorph/pe/iat_reconstructor.hpp"
 #include "typemorph/tui/dashboard.hpp"
+#ifdef _WIN32
+#include "typemorph/gui/studio_app.hpp"
+#endif
 
 #include <algorithm>
 #include <charconv>
@@ -717,12 +720,17 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph aes-recovery <binary> [--json]\n"
                "AES Key Recovery & White-box Analyzer: recovers master keys from expanded key schedules, inverts round keys, and identifies White-box AES T-Boxes.\n";
     }
+    if (command == "studio" || command == "gui" || command == "dnspy") {
+        return "Usage: typemorph studio [assembly.exe]\n"
+               "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
     }
     return "TypeMorph - binary structure inference, Rust recovery & deobfuscation.\n\n"
            "Commands:\n"
+           "  studio [assembly]    Launch native desktop GUI decompiler (dnSpy / dotPeek architecture)\n"
            "  inspect <file>       Interactive TUI dashboard\n"
            "  infer <samples...>   Differential format inference\n"
            "  rust <binary>        Rust semantic recovery\n"
@@ -5090,6 +5098,23 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_aes_recovery(parsed.value(), out_, err_);
+    }
+    if (command == "studio" || command == "gui" || command == "dnspy") {
+        if (!rest.empty() && (rest.front() == "--help" || rest.front() == "-h")) {
+            out_ << command_help("studio");
+            return 0;
+        }
+#ifdef _WIN32
+        std::string target;
+        if (!rest.empty()) {
+            target = std::string(rest.front());
+        }
+        gui::StudioApp app;
+        return app.run(target);
+#else
+        err_ << "typemorph studio: Native GUI requires Windows platform.\n";
+        return 1;
+#endif
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

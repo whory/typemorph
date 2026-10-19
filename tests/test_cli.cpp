@@ -377,6 +377,12 @@ TEST_CASE("cli: aes-recovery analyzes binary for AES artifacts") {
     CHECK(res.out.find("AES Key Recovery") != std::string::npos);
 }
 
+TEST_CASE("cli: studio displays help") {
+    const auto help_res = invoke({"studio", "--help"});
+    CHECK_EQ(help_res.exit_code, 0);
+    CHECK(help_res.out.find("dnSpy") != std::string::npos);
+}
+
 
 
 

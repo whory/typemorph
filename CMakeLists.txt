@@ -39,6 +39,7 @@ file(GLOB_RECURSE TYPEMORPH_DOTNET_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_D
 file(GLOB_RECURSE TYPEMORPH_DECOMPILE_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/decompile/*.cpp")
 file(GLOB_RECURSE TYPEMORPH_DETECT_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/detect/*.cpp")
 file(GLOB_RECURSE TYPEMORPH_LUA_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/lua/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_GUI_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/gui/*.cpp")
 
 add_library(
     typemorph_core STATIC
@@ -115,6 +116,18 @@ endif()
 add_executable(typemorph src/main.cpp)
 target_link_libraries(typemorph PRIVATE typemorph_core)
 target_compile_features(typemorph PRIVATE cxx_std_20)
+
+if(WIN32)
+    add_library(typemorph_gui STATIC ${TYPEMORPH_GUI_SOURCES})
+    target_link_libraries(typemorph_gui PUBLIC typemorph_core)
+    target_compile_features(typemorph_gui PUBLIC cxx_std_20)
+    target_compile_definitions(typemorph_gui PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+    target_link_libraries(typemorph PRIVATE typemorph_gui)
+    if(MSVC)
+        target_link_options(typemorph PRIVATE /DELAYLOAD:comctl32.dll /DELAYLOAD:comdlg32.dll /DELAYLOAD:user32.dll /DELAYLOAD:gdi32.dll delayimp.lib)
+    endif()
+endif()
+
 if(MSVC)
     target_compile_options(typemorph PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8 /EHsc)
 endif()
@@ -124,6 +137,12 @@ if(TYPEMORPH_BUILD_TESTS)
     file(GLOB TYPEMORPH_TEST_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/tests/test_*.cpp")
     add_executable(typemorph_tests tests/main.cpp ${TYPEMORPH_TEST_SOURCES})
     target_link_libraries(typemorph_tests PRIVATE typemorph_core)
+    if(WIN32)
+        target_link_libraries(typemorph_tests PRIVATE typemorph_gui)
+        if(MSVC)
+            target_link_options(typemorph_tests PRIVATE /DELAYLOAD:comctl32.dll /DELAYLOAD:comdlg32.dll /DELAYLOAD:user32.dll /DELAYLOAD:gdi32.dll delayimp.lib)
+        endif()
+    endif()
     target_compile_definitions(
         typemorph_tests
         PRIVATE TYPEMORPH_TEST_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures"
