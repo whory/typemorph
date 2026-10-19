@@ -1,0 +1,122 @@
+cmake_minimum_required(VERSION 3.25)
+
+project(
+    TypeMorph
+    VERSION 0.1.0
+    DESCRIPTION "Binary structure inference and Rust semantic recovery framework"
+    HOMEPAGE_URL "https://github.com/typemorph/typemorph"
+    LANGUAGES CXX
+)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(TYPEMORPH_BUILD_TESTS "Build unit and integration tests" ON)
+option(TYPEMORPH_FETCH_DEPS "Fetch optional third-party dependencies with FetchContent" OFF)
+option(TYPEMORPH_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
+include(cmake/Dependencies.cmake)
+
+# CONFIGURE_DEPENDS lets engine owners add translation units without racing on
+# the CMakeLists file.  A fresh configure is still required after removing one.
+file(GLOB_RECURSE TYPEMORPH_CORE_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/core/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_DERUST_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/derust/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_INFER_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/infer/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_EMITTER_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/emitter/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_TUI_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/tui/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_CLI_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/cli/*.cpp")
+file(GLOB_RECURSE TYPEMORPH_DEOBF_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/deobf/*.cpp")
+
+add_library(
+    typemorph_core STATIC
+    ${TYPEMORPH_CORE_SOURCES}
+    ${TYPEMORPH_DERUST_SOURCES}
+    ${TYPEMORPH_INFER_SOURCES}
+    ${TYPEMORPH_EMITTER_SOURCES}
+    ${TYPEMORPH_TUI_SOURCES}
+    ${TYPEMORPH_CLI_SOURCES}
+    ${TYPEMORPH_DEOBF_SOURCES}
+)
+
+add_library(TypeMorph::Core ALIAS typemorph_core)
+
+target_include_directories(
+    typemorph_core
+    PUBLIC
+        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+        "$<INSTALL_INTERFACE:include>"
+)
+
+target_compile_features(typemorph_core PUBLIC cxx_std_20)
+target_compile_definitions(
+    typemorph_core
+    PUBLIC TYPEMORPH_VERSION="${PROJECT_VERSION}"
+    PRIVATE TYPEMORPH_BUILDING_LIBRARY=1
+)
+
+if(WIN32)
+    target_compile_definitions(typemorph_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+endif()
+
+if(MSVC)
+    target_compile_options(
+        typemorph_core
+        PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8 /EHsc /MP
+    )
+    if(TYPEMORPH_WARNINGS_AS_ERRORS)
+        target_compile_options(typemorph_core PRIVATE /WX)
+    endif()
+else()
+    target_compile_options(
+        typemorph_core
+        PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
+    )
+    if(TYPEMORPH_WARNINGS_AS_ERRORS)
+        target_compile_options(typemorph_core PRIVATE -Werror)
+    endif()
+endif()
+
+if(TYPEMORPH_HAVE_FTXUI)
+    target_link_libraries(typemorph_core PUBLIC ftxui::component)
+    target_compile_definitions(typemorph_core PUBLIC TYPEMORPH_HAVE_FTXUI=1)
+endif()
+if(TYPEMORPH_HAVE_LIEF)
+    target_link_libraries(typemorph_core PUBLIC LIEF::LIEF)
+    target_compile_definitions(typemorph_core PUBLIC TYPEMORPH_HAVE_LIEF=1)
+endif()
+if(TYPEMORPH_HAVE_NLOHMANN_JSON)
+    target_compile_definitions(typemorph_core PUBLIC TYPEMORPH_HAVE_NLOHMANN_JSON=1)
+endif()
+
+add_executable(typemorph src/main.cpp)
+target_link_libraries(typemorph PRIVATE typemorph_core)
+target_compile_features(typemorph PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(typemorph PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8 /EHsc)
+endif()
+
+if(TYPEMORPH_BUILD_TESTS)
+    enable_testing()
+    file(GLOB TYPEMORPH_TEST_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/tests/test_*.cpp")
+    add_executable(typemorph_tests tests/main.cpp ${TYPEMORPH_TEST_SOURCES})
+    target_link_libraries(typemorph_tests PRIVATE typemorph_core)
+    target_compile_definitions(
+        typemorph_tests
+        PRIVATE TYPEMORPH_TEST_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures"
+    )
+    if(MSVC)
+        target_compile_options(typemorph_tests PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8 /EHsc /bigobj)
+    else()
+        target_compile_options(typemorph_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME typemorph.unit COMMAND typemorph_tests)
+endif()
+
+install(TARGETS typemorph typemorph_core RUNTIME DESTINATION bin ARCHIVE DESTINATION lib)
+install(DIRECTORY include/ DESTINATION include)
+
+message(STATUS "TypeMorph ${PROJECT_VERSION}: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "  optional deps: FTXUI=${TYPEMORPH_HAVE_FTXUI} LIEF=${TYPEMORPH_HAVE_LIEF} JSON=${TYPEMORPH_HAVE_NLOHMANN_JSON}")
+message(STATUS "  tests=${TYPEMORPH_BUILD_TESTS} fetch-deps=${TYPEMORPH_FETCH_DEPS}")

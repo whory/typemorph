@@ -1,0 +1,76 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-vs2026",
+      "displayName": "Windows x64 (Visual Studio 2026)",
+      "description": "Multi-config MSBuild build; recommended on this workstation.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/vs2026",
+      "cacheVariables": {
+        "TYPEMORPH_BUILD_TESTS": "ON",
+        "TYPEMORPH_FETCH_DEPS": "OFF"
+      }
+    },
+    {
+      "name": "windows-ninja",
+      "displayName": "Windows x64 (Ninja, MSVC environment required)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "TYPEMORPH_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "unix-release",
+      "displayName": "Unix Release (Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "TYPEMORPH_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-vs2026-debug",
+      "configurePreset": "windows-vs2026",
+      "configuration": "Debug",
+      "jobs": 0
+    },
+    {
+      "name": "windows-vs2026-release",
+      "configurePreset": "windows-vs2026",
+      "configuration": "Release"
+    },
+    {
+      "name": "unix-release",
+      "configurePreset": "unix-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-vs2026-debug",
+      "configurePreset": "windows-vs2026",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "unix-release",
+      "configurePreset": "unix-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

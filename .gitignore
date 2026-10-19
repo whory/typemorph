@@ -1,0 +1,31 @@
+# Build trees
+/build/
+/build-*/
+/out/
+/install/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.user
+*.suo
+*.vcxproj*
+*.sln
+*.slnx
+.vs/
+
+# Test/analysis artifacts
+/tests/fixtures/generated/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.dSYM/
+.coverage/
+coverage.info
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
