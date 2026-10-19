@@ -38,14 +38,31 @@ constexpr int IDM_ACTION_VFS         = 1007;
 constexpr int IDM_ACTION_IATFIX      = 1008;
 constexpr int IDM_ACTION_MEMDUMP     = 1009;
 
+// Forensic, Security, Crypto & Deobf Action IDs
+constexpr int IDM_ACTION_STRINGS     = 1030;
+constexpr int IDM_ACTION_CRYPTO      = 1031;
+constexpr int IDM_ACTION_AES_RECOVER = 1032;
+constexpr int IDM_ACTION_ENTROPY     = 1033;
+constexpr int IDM_ACTION_CHECKSEC    = 1034;
+constexpr int IDM_ACTION_RICH        = 1035;
+constexpr int IDM_ACTION_ABI         = 1036;
+constexpr int IDM_ACTION_UNXOR       = 1037;
+constexpr int IDM_ACTION_APIHASH     = 1038;
+constexpr int IDM_ACTION_OPAQUE      = 1039;
+constexpr int IDM_ACTION_CFF         = 1040;
+constexpr int IDM_ACTION_CLASSINFO   = 1041;
+constexpr int IDM_ACTION_SIGMAKE     = 1042;
+
 // Decompiler Modes
 constexpr int IDM_VIEW_CSHARP        = 1010;
 constexpr int IDM_VIEW_C             = 1011;
 constexpr int IDM_VIEW_RUST          = 1012;
+constexpr int IDM_VIEW_GO            = 1017;
 constexpr int IDM_VIEW_JAVA          = 1013;
 constexpr int IDM_VIEW_DELPHI        = 1014;
 constexpr int IDM_VIEW_VB            = 1015;
 constexpr int IDM_VIEW_AUTOIT        = 1016;
+constexpr int IDM_VIEW_LUA           = 1018;
 
 constexpr int IDM_HELP_ABOUT         = 1020;
 
@@ -112,7 +129,9 @@ void PopulateTree(const std::string& filename,
                   const delphi::DelphiReport& delphi_rep,
                   const dex::DexReport& dex_rep,
                   const vb::VbReport& vb_rep,
-                  const vm::VmProfileReport& vm_rep) {
+                  const vm::VmProfileReport& vm_rep,
+                  const golang::GoAnalysisReport& go_rep,
+                  const lua::LuaDecompileReport& lua_rep) {
     if (!g_hwndTree) return;
     SendMessageW(g_hwndTree, TVM_DELETEITEM, 0, reinterpret_cast<LPARAM>(TVI_ROOT));
 
@@ -270,6 +289,49 @@ void PopulateTree(const std::string& filename,
         }
     }
 
+    // 6. Go pclntab & Metadata (if present)
+    if (go_rep.detected) {
+        std::wstring wgo = to_wide("Go Runtime (" + std::string(golang::to_string(go_rep.version)) + ")");
+        tvis.hParent = hRoot;
+        tvis.item.pszText = const_cast<LPWSTR>(wgo.c_str());
+        HTREEITEM hGo = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
+
+        for (const auto& s : go_rep.structs) {
+            std::wstring ws = to_wide("type " + s.name + " struct");
+            TVINSERTSTRUCTW s_ins = {};
+            s_ins.hParent = hGo;
+            s_ins.hInsertAfter = TVI_LAST;
+            s_ins.item.mask = TVIF_TEXT;
+            s_ins.item.pszText = const_cast<LPWSTR>(ws.c_str());
+            SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&s_ins));
+        }
+        for (std::size_t i = 0; i < std::min<std::size_t>(go_rep.functions.size(), 50); ++i) {
+            std::wstring wf = to_wide("func " + go_rep.functions[i].name);
+            TVINSERTSTRUCTW f_ins = {};
+            f_ins.hParent = hGo;
+            f_ins.hInsertAfter = TVI_LAST;
+            f_ins.item.mask = TVIF_TEXT;
+            f_ins.item.pszText = const_cast<LPWSTR>(wf.c_str());
+            SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&f_ins));
+        }
+    }
+
+    // 7. Lua Bytecode Functions
+    if (lua_rep.is_lua_bytecode) {
+        std::wstring wlua = to_wide("Lua Bytecode (" + std::string(lua::to_string(lua_rep.flavor)) + ")");
+        tvis.hParent = hRoot;
+        tvis.item.pszText = const_cast<LPWSTR>(wlua.c_str());
+        HTREEITEM hLua = reinterpret_cast<HTREEITEM>(SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvis)));
+
+        std::wstring wr = to_wide("main (root chunk) [" + std::to_string(lua_rep.root_function.instructions.size()) + " insns]");
+        TVINSERTSTRUCTW r_ins = {};
+        r_ins.hParent = hLua;
+        r_ins.hInsertAfter = TVI_LAST;
+        r_ins.item.mask = TVIF_TEXT;
+        r_ins.item.pszText = const_cast<LPWSTR>(wr.c_str());
+        SendMessageW(g_hwndTree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&r_ins));
+    }
+
     SendMessageW(g_hwndTree, TVM_EXPAND, TVE_EXPAND, reinterpret_cast<LPARAM>(hRoot));
 }
 
@@ -414,15 +476,69 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_pApp) g_pApp->run_memdump_fix();
             return 0;
         }
+        if (id == IDM_ACTION_CHECKSEC) {
+            if (g_pApp) g_pApp->run_checksec();
+            return 0;
+        }
+        if (id == IDM_ACTION_RICH) {
+            if (g_pApp) g_pApp->run_rich_header();
+            return 0;
+        }
+        if (id == IDM_ACTION_ABI) {
+            if (g_pApp) g_pApp->run_abi_classifier();
+            return 0;
+        }
+        if (id == IDM_ACTION_STRINGS) {
+            if (g_pApp) g_pApp->run_string_revealer();
+            return 0;
+        }
+        if (id == IDM_ACTION_CRYPTO) {
+            if (g_pApp) g_pApp->run_crypto_scanner();
+            return 0;
+        }
+        if (id == IDM_ACTION_AES_RECOVER) {
+            if (g_pApp) g_pApp->run_aes_recovery();
+            return 0;
+        }
+        if (id == IDM_ACTION_ENTROPY) {
+            if (g_pApp) g_pApp->run_entropy_analysis();
+            return 0;
+        }
+        if (id == IDM_ACTION_UNXOR) {
+            if (g_pApp) g_pApp->run_unxorer();
+            return 0;
+        }
+        if (id == IDM_ACTION_APIHASH) {
+            if (g_pApp) g_pApp->run_apihash_scan();
+            return 0;
+        }
+        if (id == IDM_ACTION_OPAQUE) {
+            if (g_pApp) g_pApp->run_opaque_predicates();
+            return 0;
+        }
+        if (id == IDM_ACTION_CFF) {
+            if (g_pApp) g_pApp->run_cff_reconstruction();
+            return 0;
+        }
+        if (id == IDM_ACTION_CLASSINFO) {
+            if (g_pApp) g_pApp->run_classinformer();
+            return 0;
+        }
+        if (id == IDM_ACTION_SIGMAKE) {
+            if (g_pApp) g_pApp->run_sigmaker();
+            return 0;
+        }
 
         // View Mode Switches
         if (id == IDM_VIEW_CSHARP) { if (g_pApp) g_pApp->set_mode(DecompilerMode::csharp); return 0; }
         if (id == IDM_VIEW_C)      { if (g_pApp) g_pApp->set_mode(DecompilerMode::c_source); return 0; }
         if (id == IDM_VIEW_RUST)   { if (g_pApp) g_pApp->set_mode(DecompilerMode::rust_source); return 0; }
+        if (id == IDM_VIEW_GO)     { if (g_pApp) g_pApp->set_mode(DecompilerMode::go_source); return 0; }
         if (id == IDM_VIEW_JAVA)   { if (g_pApp) g_pApp->set_mode(DecompilerMode::dex_java); return 0; }
         if (id == IDM_VIEW_DELPHI) { if (g_pApp) g_pApp->set_mode(DecompilerMode::delphi_pascal); return 0; }
         if (id == IDM_VIEW_VB)     { if (g_pApp) g_pApp->set_mode(DecompilerMode::vb_source); return 0; }
         if (id == IDM_VIEW_AUTOIT) { if (g_pApp) g_pApp->set_mode(DecompilerMode::autoit_script); return 0; }
+        if (id == IDM_VIEW_LUA)    { if (g_pApp) g_pApp->set_mode(DecompilerMode::lua_source); return 0; }
 
         if (id == IDM_FILE_EXIT) {
             DestroyWindow(hwnd);
@@ -436,13 +552,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 L"Engines:\n"
                 L"• .NET / C# Decompiler & ConfuserEx / .NET Reactor Cleaner\n"
                 L"• C Pseudocode & Rust Trait/VTable Reconstructor\n"
+                L"• Golang pclntab & Struct Recovery\n"
                 L"• Delphi & C++Builder VCL Form Rescuer (IDR/DeDe)\n"
                 L"• Android Dalvik DEX & Java Engine (JADX style)\n"
                 L"• Visual Basic 5/6 Native & P-Code Reconstructor\n"
                 L"• AutoIt v3 Token Decompiler (Exe2Aut)\n"
+                L"• Lua & LuaJIT 2.0/2.1 Bytecode Decompiler\n"
                 L"• Virtual Machine Profiler (VMProtect / Themida / NoVmp)\n"
                 L"• Universal PE Unpacker (UPX / ASPack / PECompact)\n"
-                L"• VFS Container Extractor (Spoon Studio / Enigma Virtual Box)",
+                L"• VFS Container Extractor (Spoon Studio / Enigma Virtual Box)\n"
+                L"• Memory Dump Fixer & PE Reconstructor (vmpdump / Scylla)\n"
+                L"• ClassInformer C++ RTTI & Polymorphic Hierarchy\n"
+                L"• SigMaker (IDA / YARA / C Bytes Pattern Generator)\n"
+                L"• Cryptographic Constant Scanner & AES Key Recovery\n"
+                L"• Control Flow Flattening (CFF) Unflattener (OLLVM/Tigress)",
                 L"About TypeMorph Studio", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
@@ -495,26 +618,51 @@ void SetupMenus(HWND hwnd) {
     AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_CSHARP, L"&C# Decompiler (.NET)");
     AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_C,      L"Structured &C Pseudocode (Native x86/x64)");
     AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_RUST,   L"&Rust Semantic Source Reconstructor");
+    AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_GO,     L"&Go Source Reconstructor (pclntab)");
     AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_JAVA,   L"&Java Source (Android Dalvik DEX)");
     AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_DELPHI, L"&Pascal Units (Delphi VCL Forms)");
     AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_VB,     L"&Visual Basic 5/6 Source (.frm / .bas)");
     AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_AUTOIT, L"&AutoIt v3 Script (.au3)");
+    AppendMenuW(hDecompile, MF_STRING, IDM_VIEW_LUA,    L"&Lua Source Reconstructor (.lua)");
     AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hDecompile), L"&Decompile");
-
-    // Deobfuscate & Clean Menu
-    HMENU hDeobf = CreatePopupMenu();
-    AppendMenuW(hDeobf, MF_STRING, IDM_ACTION_DEOBF, L"&Clean .NET Assembly (ConfuserEx / .NET Reactor)\tF5");
-    AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hDeobf), L"De&obfuscate");
 
     // Protection & Analysis Menu
     HMENU hAnalysis = CreatePopupMenu();
-    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_DETECT,    L"&Compiler & Packer Detection (DIE Engine)");
-    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_VMPROFILE, L"&Virtual Machine Profiler (VMProtect / Themida)");
-    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_UNPACK,    L"&Universal PE Unpacker & Header Fix (UPX / ASPack)");
-    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_VFS,       L"&Virtual Filesystem Payload Extractor (Spoon/Enigma)");
-    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_IATFIX,    L"&Import Address Table (IAT) Reconstructor");
-    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_MEMDUMP,   L"&Memory Dump Fixer & PE Reconstructor (vmpdump / Scylla)");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_DETECT,      L"&Compiler & Packer Detection (DIE Engine)");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_CHECKSEC,    L"&Binary Hardening & Mitigations (checksec)");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_RICH,        L"&MSVC Rich Header & Compiler Fingerprint");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_ABI,         L"&Calling Convention & ABI Classifier");
+    AppendMenuW(hAnalysis, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_VMPROFILE,   L"&Virtual Machine Profiler (VMProtect / Themida)");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_UNPACK,      L"&Universal PE Unpacker & Header Fix (UPX / ASPack)");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_VFS,         L"&Virtual Filesystem Payload Extractor (Spoon/Enigma)");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_IATFIX,      L"&Import Address Table (IAT) Reconstructor");
+    AppendMenuW(hAnalysis, MF_STRING, IDM_ACTION_MEMDUMP,     L"&Memory Dump Fixer & PE Reconstructor (vmpdump / Scylla)");
     AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hAnalysis), L"&Analysis");
+
+    // Forensics & Cryptography Menu
+    HMENU hForensics = CreatePopupMenu();
+    AppendMenuW(hForensics, MF_STRING, IDM_ACTION_STRINGS,     L"&Extract Obfuscated Strings (ASCII / UTF-16 / Stack / XOR / Base64)");
+    AppendMenuW(hForensics, MF_STRING, IDM_ACTION_CRYPTO,      L"&Cryptographic Constants Scanner (AES / SHA / MD5 / CRC)");
+    AppendMenuW(hForensics, MF_STRING, IDM_ACTION_AES_RECOVER, L"&AES Key Schedule Recovery & White-box Analyzer");
+    AppendMenuW(hForensics, MF_STRING, IDM_ACTION_ENTROPY,     L"&Shannon Entropy Distribution & High-Entropy Zones");
+    AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hForensics), L"&Forensics");
+
+    // Deobfuscation & Advanced Reversing Menu
+    HMENU hDeobf = CreatePopupMenu();
+    AppendMenuW(hDeobf, MF_STRING, IDM_ACTION_DEOBF,      L"&Clean .NET Assembly (ConfuserEx / .NET Reactor)\tF5");
+    AppendMenuW(hDeobf, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hDeobf, MF_STRING, IDM_ACTION_UNXOR,      L"&Automated XOR Key Discovery (UnXORer)");
+    AppendMenuW(hDeobf, MF_STRING, IDM_ACTION_APIHASH,    L"&Resolve Obfuscated API Hashes (ROR13 / DJB2 / FNV1a)");
+    AppendMenuW(hDeobf, MF_STRING, IDM_ACTION_OPAQUE,     L"&Detect Opaque Predicates & Dead Branches");
+    AppendMenuW(hDeobf, MF_STRING, IDM_ACTION_CFF,        L"&Control Flow Flattening (CFF) Unflattener (OLLVM / Tigress)");
+    AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hDeobf), L"De&obfuscate");
+
+    // Tools & Signatures Menu
+    HMENU hTools = CreatePopupMenu();
+    AppendMenuW(hTools, MF_STRING, IDM_ACTION_CLASSINFO,  L"&ClassInformer C++ RTTI Explorer");
+    AppendMenuW(hTools, MF_STRING, IDM_ACTION_SIGMAKE,    L"&SigMaker (IDA / YARA / Byte Signature Generator)");
+    AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hTools), L"&Tools");
 
     // Help Menu
     HMENU hHelp = CreatePopupMenu();
@@ -546,16 +694,21 @@ void StudioApp::open_file(const std::string& path) {
     dex_report_    = dex::DexAnalyzer::analyze(v);
     vb_report_     = vb::VbAnalyzer::analyze(v);
     autoit_report_ = autoit::AutoItDecompiler::analyze(v);
+    lua_report_    = lua::LuaDecompiler{}.decompile(v);
     vfs_report_    = unpack::VfsExtractor::analyze(v);
     unpack_target_ = unpack::UniversalUnpacker::detect(v);
     vm_report_     = vm::VmProfiler::analyze(v);
+
+    golang::GoAnalyzer go_an;
+    auto img_res_go = core::ExecutableImage::parse(v);
+    go_report_ = img_res_go ? go_an.analyze(img_res_go.value()) : go_an.analyze_view(v);
 
     // 2. Identify primary engine
     std::string filename = path;
     auto last_slash = filename.find_last_of("\\/");
     if (last_slash != std::string::npos) filename = filename.substr(last_slash + 1);
 
-    PopulateTree(filename, dotnet_report_, delphi_report_, dex_report_, vb_report_, vm_report_);
+    PopulateTree(filename, dotnet_report_, delphi_report_, dex_report_, vb_report_, vm_report_, go_report_, lua_report_);
 
     if (dotnet_report_.is_dotnet) {
         dotnet_report_.csharp_source = dotnet::DotNetAnalyzer::to_csharp(dotnet_report_);
@@ -579,6 +732,14 @@ void StudioApp::open_file(const std::string& path) {
         set_mode(DecompilerMode::autoit_script);
         SetStatusBarText(1, "AutoIt: " + autoit_report_.version);
         SetStatusBarText(2, "Payload: " + std::to_string(autoit_report_.primary_script.size()) + " B");
+    } else if (lua_report_.is_lua_bytecode) {
+        set_mode(DecompilerMode::lua_source);
+        SetStatusBarText(1, "Lua Bytecode: " + std::string(lua::to_string(lua_report_.flavor)));
+        SetStatusBarText(2, "Functions: " + std::to_string(lua_report_.total_functions));
+    } else if (go_report_.detected) {
+        set_mode(DecompilerMode::go_source);
+        SetStatusBarText(1, "Go Runtime: " + std::string(golang::to_string(go_report_.version)));
+        SetStatusBarText(2, "Functions: " + std::to_string(go_report_.functions.size()));
     } else {
         // Native PE / ELF / Mach-O binary -> Native C pseudocode
         set_mode(DecompilerMode::c_source);
@@ -674,6 +835,22 @@ void StudioApp::set_mode(DecompilerMode mode) {
 
     case DecompilerMode::vfs_summary:
         text_output = unpack::VfsExtractor::format_report(vfs_report_);
+        break;
+
+    case DecompilerMode::go_source:
+        if (go_report_.detected) {
+            text_output = go_report_.golang_source.empty() ? golang::GoAnalyzer::to_golang_source(go_report_) : go_report_.golang_source;
+        } else {
+            text_output = "// No Go runtime metadata or pclntab detected.";
+        }
+        break;
+
+    case DecompilerMode::lua_source:
+        if (lua_report_.is_lua_bytecode) {
+            text_output = lua_report_.lua_source.empty() ? lua::LuaDecompiler::to_lua_source(lua_report_) : lua_report_.lua_source;
+        } else {
+            text_output = "// Not a Lua or LuaJIT bytecode file.";
+        }
         break;
 
     case DecompilerMode::raw_disasm:
@@ -779,6 +956,700 @@ void StudioApp::run_memdump_fix() {
     std::string report = dump::DumpFixer::format_report(rep);
     SetWindowTextW(g_hwndCode, normalize_crlf(report).c_str());
     LogMessage("[Memory Dump Fixer] Source: " + rep.detected_source + " | Sections: " + std::to_string(rep.sections.size()));
+}
+
+void StudioApp::run_checksec() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    security::SecurityAnalyzer analyzer;
+    auto report = analyzer.analyze_view(view.value());
+
+    std::ostringstream out;
+    char ep_buf[32];
+    std::snprintf(ep_buf, sizeof(ep_buf), "0x%llx", static_cast<unsigned long long>(report.entry_point));
+
+    out << "TypeMorph Binary Hardening & Security Inspector (checksec)\n"
+        << "=========================================================\n"
+        << "  Target:      " << current_file_ << " (" << core::to_string(report.format) << ", " << report.bits << "-bit)\n"
+        << "  Entry Point: " << ep_buf
+        << (report.entry_point_outside_code ? " [WARNING: Outside code section!]" : " [Code section]") << "\n\n";
+
+    out << "Mitigations & Protections:\n";
+    const auto& m = report.mitigations;
+    out << "  ASLR:                  " << (m.aslr ? "Enabled" : "Disabled") << "\n";
+    out << "  High-Entropy VA:       " << (m.high_entropy_va ? "Enabled" : "Disabled") << "\n";
+    out << "  DEP / NX:              " << (m.dep_nx ? "Enabled" : "Disabled") << "\n";
+    out << "  Control Flow Guard:    " << (m.cfg ? "Enabled" : "Disabled") << "\n";
+    out << "  CET Shadow Stack:      " << (m.cet_shadow_stack ? "Enabled" : "Disabled") << "\n";
+    if (report.format == core::ImageFormat::pe) {
+        out << "  SafeSEH:               " << (m.safe_seh ? "Enabled" : "Disabled / N/A") << "\n";
+        out << "  Authenticode Signed:   " << (m.signed_binary ? "Signed" : "No signature") << "\n";
+        out << "  TLS Callbacks:         " << (report.has_tls_callbacks ? "Present" : "None") << "\n";
+    } else {
+        out << "  PIE:                   " << (m.pie ? "Enabled" : "Disabled") << "\n";
+        out << "  RELRO:                 " << (m.relro ? "Enabled" : "Disabled") << "\n";
+        out << "  Stack Canary:          " << (m.stack_canary ? "Found" : "Not detected") << "\n";
+    }
+
+    out << "\nPackers & Protections Detected:\n";
+    if (report.packers.empty()) {
+        out << "  None detected (standard compiler output)\n";
+    } else {
+        for (const auto& p : report.packers) {
+            out << "  - " << p.name << " (confidence "
+                << std::fixed << std::setprecision(1) << (p.confidence * 100.0) << "%): "
+                << p.rationale << "\n";
+        }
+    }
+
+    out << "\nSection Anomalies:\n";
+    if (report.section_anomalies.empty()) {
+        out << "  None (W^X respected, normal section ratios)\n";
+    } else {
+        for (const auto& a : report.section_anomalies) {
+            out << "  - Section '" << a.name << "': " << a.note;
+            if (a.is_wx) out << " [W^X VIOLATION]";
+            out << "\n";
+        }
+    }
+
+    out << "\nOverlay Data:\n";
+    if (!report.overlay.present) {
+        out << "  None\n";
+    } else {
+        char ov_buf[32];
+        std::snprintf(ov_buf, sizeof(ov_buf), "0x%llx", static_cast<unsigned long long>(report.overlay.offset));
+        out << "  Present at offset " << ov_buf << " (" << report.overlay.size << " bytes, entropy: "
+            << std::fixed << std::setprecision(2) << report.overlay.entropy << " - "
+            << core::entropy_label(report.overlay.entropy) << ")\n";
+    }
+
+    out << "\nAnti-Analysis & Evasion Indicators:\n";
+    if (report.anti_analysis_indicators.empty()) {
+        out << "  None detected\n";
+    } else {
+        for (const auto& ind : report.anti_analysis_indicators) {
+            out << "  - " << ind << "\n";
+        }
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[checksec] Analysis complete for " + current_file_);
+}
+
+void StudioApp::run_rich_header() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    pe::RichHeaderParser parser;
+    auto rep = parser.parse(view.value());
+
+    std::ostringstream out;
+    out << "TypeMorph MSVC Rich Header & Compiler Fingerprinter\n"
+        << "===================================================\n"
+        << "  Target: " << current_file_ << "\n";
+
+    if (!rep.present) {
+        out << "  No MSVC Rich header present (binary not built with MSVC or stripped).\n";
+    } else {
+        char key_buf[32], off_buf[32];
+        std::snprintf(key_buf, sizeof(key_buf), "0x%08X", rep.xor_key);
+        std::snprintf(off_buf, sizeof(off_buf), "0x%llx", static_cast<unsigned long long>(rep.offset));
+
+        out << "  Offset:      " << off_buf << " (" << rep.size << " bytes)\n"
+            << "  XOR Key:     " << key_buf << "\n"
+            << "  Checksum:    0x" << std::hex << std::uppercase << rep.checksum << std::dec << "\n"
+            << "  RichPE Hash: " << rep.hash << "\n\n";
+
+        if (!rep.compiler_versions.empty()) {
+            out << "Compilers / Toolsets Identified:\n";
+            for (const auto& vs : rep.compiler_versions) {
+                out << "  - " << vs << "\n";
+            }
+            out << "\n";
+        }
+
+        out << "Decoded Tool Records (" << rep.records.size() << "):\n";
+        for (const auto& rec : rep.records) {
+            char comp_buf[32];
+            std::snprintf(comp_buf, sizeof(comp_buf), "0x%04X", rec.tool_id);
+            out << "  [" << comp_buf << "] " << rec.tool_name << " (Build " << rec.build_number
+                << "): " << rec.count << " artifact(s) [" << rec.vs_version << "]\n";
+        }
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[Rich Header] Parsed " + std::to_string(rep.records.size()) + " compiler records.");
+}
+
+void StudioApp::run_abi_classifier() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    auto image_res = core::ExecutableImage::parse(view.value());
+    if (!image_res) {
+        LogMessage("[ABI Classifier] Executable format not recognized.");
+        return;
+    }
+
+    abi::AbiClassifier classifier;
+    auto rep = classifier.analyze(image_res.value(), std::nullopt);
+
+    std::ostringstream out;
+    out << "TypeMorph Calling Convention & ABI Classifier\n"
+        << "=============================================\n"
+        << "  Target: " << current_file_ << "\n"
+        << "  Functions Analyzed: " << rep.total_functions << "\n\n";
+
+    if (!rep.convention_distribution.empty()) {
+        out << "Calling Convention Distribution:\n";
+        for (const auto& [conv, count] : rep.convention_distribution) {
+            double pct = (rep.total_functions > 0) ? (100.0 * static_cast<double>(count) / static_cast<double>(rep.total_functions)) : 0.0;
+            out << "  - " << std::left << std::setw(16) << conv << ": " << count
+                << " (" << std::fixed << std::setprecision(1) << pct << "%)\n";
+        }
+        out << "\n";
+    }
+
+    out << "Recovered Function Signatures (" << rep.signatures.size() << "):\n";
+    std::size_t limit = std::min<std::size_t>(rep.signatures.size(), 80);
+    for (std::size_t i = 0; i < limit; ++i) {
+        const auto& sig = rep.signatures[i];
+        char va_buf[32];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llx", static_cast<unsigned long long>(sig.entry_va));
+        out << "  [" << va_buf << "] " << sig.prototype << "\n"
+            << "     Convention: " << to_string(sig.convention)
+            << " | Frame: " << sig.stack_frame_size << "B";
+        if (sig.stack_purge_bytes > 0) {
+            out << " | Purge: " << sig.stack_purge_bytes << "B";
+        }
+        out << " | " << sig.rationale << "\n";
+    }
+    if (rep.signatures.size() > limit) {
+        out << "  ... and " << (rep.signatures.size() - limit) << " more signatures.\n";
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[ABI Classifier] Classified " + std::to_string(rep.total_functions) + " functions.");
+}
+
+void StudioApp::run_crypto_scanner() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    crypto::CryptoScanOptions opts;
+    crypto::CryptoScanner scanner(opts);
+    auto matches = scanner.scan(view.value());
+
+    std::ostringstream out;
+    out << "TypeMorph Cryptographic & Hashing Constant Scanner\n"
+        << "=================================================\n"
+        << "Target: " << current_file_ << " (" << view.value().size() << " bytes)\n";
+    if (matches.empty()) {
+        out << "No known cryptographic constants detected.\n";
+    } else {
+        out << "Found " << matches.size() << " cryptographic constant(s):\n";
+        out << "--------------------------------------------------------------------------------\n";
+        out << "Offset      Algorithm           Role                      Category   Endian\n";
+        out << "--------------------------------------------------------------------------------\n";
+        for (const auto& m : matches) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "0x%08llx", static_cast<unsigned long long>(m.offset));
+            out << buf << "  "
+                << std::left << std::setw(18) << m.algorithm.substr(0, 18) << "  "
+                << std::setw(24) << m.role.substr(0, 24) << "  "
+                << std::setw(10) << std::string(crypto::to_string(m.category)) << " "
+                << m.endianness << "\n"
+                << "            -> " << m.description << "\n";
+        }
+        out << "--------------------------------------------------------------------------------\n";
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[Crypto Scanner] Found " + std::to_string(matches.size()) + " cryptographic constants.");
+}
+
+void StudioApp::run_aes_recovery() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    crypto::AesKeyRecoveryEngine engine;
+    auto rep = engine.analyze(view.value());
+
+    std::string report = crypto::AesKeyRecoveryEngine::to_text_report(rep);
+    SetWindowTextW(g_hwndCode, normalize_crlf(report).c_str());
+    LogMessage("[AES Recovery] Keys recovered: " + std::to_string(rep.recovered_keys.size()) +
+               " | White-box tables: " + std::to_string(rep.whitebox_tables.size()));
+}
+
+void StudioApp::run_entropy_analysis() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    const auto& v = view.value();
+    std::size_t block_size = 256;
+    if (v.size() > 1024 * 1024) block_size = 1024;
+    if (v.size() > 16 * 1024 * 1024) block_size = 4096;
+
+    auto blocks_res = core::block_entropy(v.bytes(), block_size);
+    if (!blocks_res) return;
+    const auto& blocks = blocks_res.value();
+    const double total_entropy = core::shannon_entropy(v.bytes());
+
+    double min_ent = 8.0, max_ent = 0.0, sum_ent = 0.0;
+    for (double ent : blocks) {
+        min_ent = std::min(min_ent, ent);
+        max_ent = std::max(max_ent, ent);
+        sum_ent += ent;
+    }
+    double mean_ent = blocks.empty() ? 0.0 : sum_ent / static_cast<double>(blocks.size());
+
+    struct HighEntropyRange {
+        std::uint64_t start = 0;
+        std::uint64_t end = 0;
+        double sum = 0.0;
+        std::size_t count = 0;
+    };
+    std::vector<HighEntropyRange> high_ranges;
+    bool in_high = false;
+    HighEntropyRange cur_high;
+
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(i) * block_size;
+        const std::uint64_t end = std::min<std::uint64_t>(offset + block_size, v.size());
+        if (blocks[i] >= 7.20) {
+            if (!in_high) {
+                in_high = true;
+                cur_high.start = offset;
+                cur_high.end = end;
+                cur_high.sum = blocks[i];
+                cur_high.count = 1;
+            } else {
+                cur_high.end = end;
+                cur_high.sum += blocks[i];
+                cur_high.count++;
+            }
+        } else if (in_high) {
+            in_high = false;
+            high_ranges.push_back(cur_high);
+        }
+    }
+    if (in_high) high_ranges.push_back(cur_high);
+
+    std::ostringstream out;
+    out << "TypeMorph Shannon Entropy Distribution Map\n"
+        << "===========================================\n"
+        << "Target: " << current_file_ << " (" << v.size() << " bytes)\n"
+        << "Total Entropy: " << std::fixed << std::setprecision(2) << total_entropy
+        << " / 8.00 bits/byte | Block size: " << block_size << " bytes\n"
+        << "Range: [" << min_ent << " .. " << max_ent << "], Mean: " << mean_ent << " bits/byte\n"
+        << "--------------------------------------------------------------------------------\n"
+        << "Offset Range               Entropy Bar                  Bits/B  Class\n"
+        << "--------------------------------------------------------------------------------\n";
+
+    std::size_t sample_limit = std::min<std::size_t>(blocks.size(), 200);
+    for (std::size_t i = 0; i < sample_limit; ++i) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(i) * block_size;
+        const std::uint64_t end = std::min<std::uint64_t>(offset + block_size, v.size());
+        const double ent = blocks[i];
+        const int filled = std::clamp(static_cast<int>(std::round((ent / 8.0) * 24.0)), 0, 24);
+        std::string bar(filled, '#');
+        bar.append(24 - filled, '.');
+
+        char range_buf[64];
+        std::snprintf(range_buf, sizeof(range_buf), "0x%08llx - 0x%08llx",
+                      static_cast<unsigned long long>(offset),
+                      static_cast<unsigned long long>(end > 0 ? end - 1 : 0));
+
+        out << range_buf << "  [" << bar << "]  " << std::fixed << std::setprecision(2) << ent << "   "
+            << core::entropy_label(ent);
+        if (ent >= 7.20) out << " [HIGH]";
+        out << '\n';
+    }
+    if (blocks.size() > sample_limit) {
+        out << "... and " << (blocks.size() - sample_limit) << " more blocks.\n";
+    }
+    out << "--------------------------------------------------------------------------------\n";
+    if (!high_ranges.empty()) {
+        out << "Detected " << high_ranges.size() << " High-Entropy Zone(s) (>= 7.20 bits/byte):\n";
+        for (const auto& r : high_ranges) {
+            const double avg = r.count == 0 ? 0.0 : r.sum / static_cast<double>(r.count);
+            char r_buf[64];
+            std::snprintf(r_buf, sizeof(r_buf), "  * 0x%08llx - 0x%08llx",
+                          static_cast<unsigned long long>(r.start),
+                          static_cast<unsigned long long>(r.end > 0 ? r.end - 1 : 0));
+            out << r_buf << " (" << (r.end - r.start) << " B, avg " << std::fixed
+                << std::setprecision(2) << avg << " bits/byte) -> Packed, compressed, or encrypted\n";
+        }
+    } else {
+        out << "No packed or encrypted high-entropy zones detected (all blocks < 7.20 bits/byte).\n";
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[Entropy Map] Total entropy: " + std::to_string(total_entropy) + " bits/byte.");
+}
+
+void StudioApp::run_string_revealer() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    deobf::StringScanOptions options;
+    deobf::StringRevealer revealer(options);
+    auto strings = revealer.extract(view.value());
+
+    std::ostringstream out;
+    out << "TypeMorph String Revealer (Embedded, Stack, XOR & Base64)\n"
+        << "=========================================================\n"
+        << "Target: " << current_file_ << " | Found " << strings.size() << " string(s)\n\n";
+
+    for (const auto& s : strings) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "0x%08llx", static_cast<unsigned long long>(s.offset));
+        out << buf << " [" << std::left << std::setw(7) << deobf::to_string(s.category)
+            << std::right << "] " << s.value;
+        if (!s.note.empty()) out << " (" << s.note << ")";
+        out << '\n';
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[String Revealer] Extracted " + std::to_string(strings.size()) + " strings.");
+}
+
+void StudioApp::run_unxorer() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    deobf::UnxorOptions options;
+    deobf::Unxorer unxorer(options);
+    auto candidates = unxorer.crack(view.value());
+
+    std::ostringstream out;
+    out << "TypeMorph UnXORer: Automatic XOR Key Discovery\n"
+        << "===============================================\n"
+        << "Target: " << current_file_ << "\n"
+        << "Discovered " << candidates.size() << " candidate key(s):\n\n";
+
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const auto& c = candidates[i];
+        out << "[Candidate #" << i + 1 << "] Key Length: " << c.key.size() << " byte(s)\n";
+        out << "  Key (hex): ";
+        for (std::uint8_t b : c.key) {
+            char hb[8];
+            std::snprintf(hb, sizeof(hb), "%02X ", b);
+            out << hb;
+        }
+        out << "\n  Confidence: " << std::fixed << std::setprecision(1) << (c.confidence * 100.0) << "%\n"
+            << "  Entropy:    " << std::setprecision(2) << c.entropy << " bits/byte\n"
+            << "  Rationale:  " << c.rationale << "\n"
+            << "  Preview:    \"" << c.preview << "\"\n\n";
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[UnXORer] Evaluated " + std::to_string(candidates.size()) + " candidate keys.");
+}
+
+void StudioApp::run_apihash_scan() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    deobf::ApiHashResolver resolver;
+    auto matches = resolver.scan(view.value());
+
+    std::ostringstream out;
+    out << "TypeMorph API Hash Scanner (ROR13 / DJB2 / SDBM / FNV1a / CRC32)\n"
+        << "=================================================================\n"
+        << "Target: " << current_file_ << "\n"
+        << "Matches Identified: " << matches.size() << "\n\n";
+
+    if (matches.empty()) {
+        out << "  No known API hashes identified.\n";
+    } else {
+        for (const auto& m : matches) {
+            char off_buf[32], hash_buf[32];
+            std::snprintf(off_buf, sizeof(off_buf), "0x%llx", static_cast<unsigned long long>(m.offset));
+            std::snprintf(hash_buf, sizeof(hash_buf), "0x%08X", m.hash_value);
+            out << "  [" << off_buf << "] " << hash_buf << " -> "
+                << m.module_name << "!" << m.api_name
+                << " (" << to_string(m.algorithm) << ", conf: "
+                << std::fixed << std::setprecision(1) << (m.confidence * 100.0) << "%)\n";
+        }
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[API Hash Scanner] Identified " + std::to_string(matches.size()) + " API calls.");
+}
+
+void StudioApp::run_opaque_predicates() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    deobf::OpaquePredicateDetector detector;
+    auto matches = detector.scan(view.value());
+
+    std::ostringstream out;
+    out << "TypeMorph Opaque Predicate & Dead Code Detector\n"
+        << "===============================================\n"
+        << "Target: " << current_file_ << "\n"
+        << "Opaque Invariants Detected: " << matches.size() << "\n\n";
+
+    if (matches.empty()) {
+        out << "  No invariant opaque predicates detected.\n";
+    } else {
+        for (const auto& m : matches) {
+            char off_buf[32];
+            std::snprintf(off_buf, sizeof(off_buf), "0x%llx", static_cast<unsigned long long>(m.offset));
+            out << "  [" << off_buf << "] " << m.disassembly_hint
+                << " => " << (m.outcome == deobf::PredicateOutcome::always_true ? "ALWAYS TAKEN" : "NEVER TAKEN (DEAD)")
+                << " (" << m.pattern_name << ")\n"
+                << "     " << m.rationale << "\n";
+        }
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[Opaque Predicates] Found " + std::to_string(matches.size()) + " dead branches.");
+}
+
+void StudioApp::run_cff_reconstruction() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    auto img = core::ExecutableImage::parse(view.value());
+    if (!img) {
+        LogMessage("[CFF Unflattener] Requires valid PE/ELF executable.");
+        return;
+    }
+
+    deobf::CffOptions opts;
+    deobf::CffReconstructor reconstructor(opts);
+    auto fns = reconstructor.analyze(img.value());
+
+    std::ostringstream out;
+    out << "TypeMorph Control Flow Flattening (CFF) Unflattener\n"
+        << "===================================================\n"
+        << "Target: " << current_file_ << "\n"
+        << "Flattened Functions Detected: " << fns.size() << "\n\n";
+
+    if (fns.empty()) {
+        out << "  No control flow flattening dispatchers detected.\n";
+    } else {
+        for (std::size_t i = 0; i < fns.size(); ++i) {
+            const auto& fn = fns[i];
+            char va_buf[64];
+            std::snprintf(va_buf, sizeof(va_buf), "0x%llx", static_cast<unsigned long long>(fn.dispatcher_va));
+            out << "Function #" << i + 1 << ": Dispatcher at " << va_buf
+                << " (State Var: " << fn.state_variable << ", Confidence: "
+                << std::fixed << std::setprecision(1) << (fn.confidence * 100.0) << "%)\n"
+                << "  Blocks: " << fn.blocks.size() << " | Recovered Transitions: "
+                << fn.transitions.size() << "\n"
+                << "  " << fn.rationale << "\n"
+                << "  State Transitions (Reconstructed Sequence):\n";
+            for (const auto& t : fn.transitions) {
+                char t_buf[128];
+                std::snprintf(t_buf, sizeof(t_buf), "    State 0x%X -> State 0x%X%s",
+                              t.from_state, t.to_state,
+                              t.condition.empty() ? "" : (" [" + t.condition + "]").c_str());
+                out << t_buf << "\n";
+            }
+            out << "\n";
+        }
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[CFF Unflattener] Analyzed " + std::to_string(fns.size()) + " flattened functions.");
+}
+
+void StudioApp::run_classinformer() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    rtti::RttiAnalyzer analyzer;
+    auto classes = analyzer.analyze_view(view.value());
+
+    std::ostringstream out;
+    out << "TypeMorph ClassInformer - C++ RTTI & Polymorphic Hierarchy\n"
+        << "===========================================================\n"
+        << "Target: " << current_file_ << "\n"
+        << "Found " << classes.size() << " polymorphic C++ class(es):\n\n";
+
+    if (classes.empty()) {
+        out << "  No C++ RTTI CompleteObjectLocator or TypeDescriptor entries found.\n";
+    } else {
+        for (std::size_t i = 0; i < classes.size(); ++i) {
+            const auto& cls = classes[i];
+            char vf_buf[32], loc_buf[32];
+            std::snprintf(vf_buf, sizeof(vf_buf), "0x%llX", static_cast<unsigned long long>(cls.vftable_va));
+            std::snprintf(loc_buf, sizeof(loc_buf), "0x%llX", static_cast<unsigned long long>(cls.locator_va));
+
+            out << "  [" << (i + 1) << "] class " << cls.name;
+            if (!cls.base_classes.empty()) {
+                out << " : ";
+                for (std::size_t b = 0; b < cls.base_classes.size(); ++b) {
+                    if (b > 0) out << ", ";
+                    out << "public " << cls.base_classes[b].name;
+                }
+            }
+            out << "\n      Vftable: " << vf_buf << " | Locator: " << loc_buf
+                << " | Methods: " << cls.methods.size() << "\n";
+
+            if (!cls.base_classes.empty()) {
+                out << "      Hierarchy: ";
+                for (std::size_t b = 0; b < cls.base_classes.size(); ++b) {
+                    if (b > 0) out << " -> ";
+                    out << cls.base_classes[b].name << " (+0x" << std::hex << cls.base_classes[b].offset << std::dec << ")";
+                }
+                out << "\n";
+            }
+            if (!cls.methods.empty()) {
+                std::size_t limit = std::min<std::size_t>(cls.methods.size(), 8);
+                for (std::size_t m = 0; m < limit; ++m) {
+                    char m_buf[32];
+                    std::snprintf(m_buf, sizeof(m_buf), "0x%llX", static_cast<unsigned long long>(cls.methods[m].virtual_address));
+                    out << "        slot[" << cls.methods[m].slot << "] " << m_buf << ": " << cls.methods[m].name << "()\n";
+                }
+                if (cls.methods.size() > limit) {
+                    out << "        ... and " << (cls.methods.size() - limit) << " more virtual slots\n";
+                }
+            }
+            out << "\n";
+        }
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[ClassInformer] Reconstructed " + std::to_string(classes.size()) + " polymorphic classes.");
+}
+
+namespace {
+struct GeneratedSig {
+    std::uint64_t function_va = 0;
+    std::string function_name;
+    std::size_t length = 0;
+    std::string pattern_ida;
+    std::string pattern_yara;
+    std::string pattern_bytes;
+    std::string pattern_mask;
+    std::size_t wildcard_count = 0;
+};
+
+GeneratedSig make_gui_signature(const core::ExecutableImage& image,
+                                const core::BinaryView& view,
+                                std::uint64_t func_va,
+                                std::string func_name,
+                                std::size_t desired_len) {
+    GeneratedSig sig;
+    sig.function_va = func_va;
+    sig.function_name = std::move(func_name);
+
+    auto off_res = image.va_to_offset(func_va);
+    if (!off_res || off_res.value() >= view.size()) return sig;
+
+    const std::uint64_t file_off = off_res.value();
+    const std::size_t max_avail = static_cast<std::size_t>(view.size() - file_off);
+    const std::size_t len = std::min<std::size_t>(desired_len, max_avail);
+    sig.length = len;
+
+    const std::uint8_t* bytes = view.data() + file_off;
+    std::ostringstream ida_ss, yara_ss, bytes_ss, mask_ss;
+    yara_ss << "{ ";
+
+    for (std::size_t i = 0; i < len; ++i) {
+        bool wildcard = false;
+        if (i >= 1 && (bytes[i - 1] == 0xE8 || bytes[i - 1] == 0xE9) && i + 3 <= len) {
+            wildcard = true;
+        } else if (i >= 2 && i <= len && (bytes[i - 2] == 0xE8 || bytes[i - 2] == 0xE9)) {
+            wildcard = true;
+        } else if (i >= 3 && i <= len && (bytes[i - 3] == 0xE8 || bytes[i - 3] == 0xE9)) {
+            wildcard = true;
+        } else if (i >= 4 && i <= len && (bytes[i - 4] == 0xE8 || bytes[i - 4] == 0xE9)) {
+            wildcard = true;
+        }
+        if (image.bits() == 64 && i >= 3 && i + 1 <= len) {
+            if (bytes[i - 3] == 0x48 && (bytes[i - 2] == 0x8B || bytes[i - 2] == 0x8D) && (bytes[i - 1] & 0xC7) == 0x05) {
+                wildcard = true;
+            }
+        }
+
+        if (wildcard) {
+            ++sig.wildcard_count;
+            if (i > 0) ida_ss << " ";
+            ida_ss << "??";
+            yara_ss << "?? ";
+            bytes_ss << "\\x00";
+            mask_ss << "?";
+        } else {
+            char hex_byte[8];
+            std::snprintf(hex_byte, sizeof(hex_byte), "%02X", bytes[i]);
+            if (i > 0) ida_ss << " ";
+            ida_ss << hex_byte;
+            std::snprintf(hex_byte, sizeof(hex_byte), "%02x ", bytes[i]);
+            yara_ss << hex_byte;
+            std::snprintf(hex_byte, sizeof(hex_byte), "\\x%02X", bytes[i]);
+            bytes_ss << hex_byte;
+            mask_ss << "x";
+        }
+    }
+    yara_ss << "}";
+
+    sig.pattern_ida = ida_ss.str();
+    sig.pattern_yara = yara_ss.str();
+    sig.pattern_bytes = bytes_ss.str();
+    sig.pattern_mask = mask_ss.str();
+    return sig;
+}
+}  // namespace
+
+void StudioApp::run_sigmaker() {
+    if (current_file_.empty()) return;
+    auto view = core::BinaryView::open(current_file_);
+    if (!view) return;
+
+    auto img = core::ExecutableImage::parse(view.value());
+    if (!img) {
+        LogMessage("[SigMaker] Requires valid executable binary.");
+        return;
+    }
+
+    abi::AbiClassifier classifier;
+    auto abi_rep = classifier.analyze(img.value());
+
+    std::vector<GeneratedSig> sigs;
+    std::size_t limit = std::min<std::size_t>(abi_rep.signatures.size(), 20);
+    for (std::size_t i = 0; i < limit; ++i) {
+        const auto& fn = abi_rep.signatures[i];
+        sigs.push_back(make_gui_signature(img.value(), view.value(), fn.entry_va, fn.name, 32));
+    }
+
+    std::ostringstream out;
+    out << "TypeMorph Signature Maker (SigMaker)\n"
+        << "====================================\n"
+        << "Target: " << current_file_ << "\n"
+        << "Generated " << sigs.size() << " signature pattern(s):\n\n";
+
+    for (const auto& s : sigs) {
+        char va_buf[32];
+        std::snprintf(va_buf, sizeof(va_buf), "0x%llX", static_cast<unsigned long long>(s.function_va));
+        out << "Function: " << s.function_name << " (" << va_buf << ", len: " << s.length
+            << ", wildcards: " << s.wildcard_count << ")\n"
+            << "  IDA   : " << s.pattern_ida << "\n"
+            << "  YARA  : " << s.pattern_yara << "\n"
+            << "  Bytes : \"" << s.pattern_bytes << "\"\n"
+            << "  Mask  : \"" << s.pattern_mask << "\"\n\n";
+    }
+
+    SetWindowTextW(g_hwndCode, normalize_crlf(out.str()).c_str());
+    LogMessage("[SigMaker] Generated " + std::to_string(sigs.size()) + " function signatures.");
 }
 
 int StudioApp::run(const std::string& initial_file) {

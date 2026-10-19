@@ -10,20 +10,35 @@
 #ifdef _WIN32
 
 #include "typemorph/core/binary_view.hpp"
+#include "typemorph/core/entropy.hpp"
 #include "typemorph/dotnet/dotnet_analyzer.hpp"
 #include "typemorph/dotnet/dotnet_deobf.hpp"
 #include "typemorph/delphi/delphi_analyzer.hpp"
 #include "typemorph/dex/dex_analyzer.hpp"
 #include "typemorph/vb/vb_analyzer.hpp"
 #include "typemorph/autoit/autoit_decompiler.hpp"
+#include "typemorph/lua/lua_decompiler.hpp"
 #include "typemorph/unpack/vfs_extractor.hpp"
 #include "typemorph/unpack/universal_unpacker.hpp"
 #include "typemorph/vm/vm_analyzer.hpp"
 #include "typemorph/decompile/c_decompiler.hpp"
 #include "typemorph/derust/rust_source.hpp"
+#include "typemorph/go/go_analyzer.hpp"
 #include "typemorph/detect/detect_engine.hpp"
 #include "typemorph/pe/iat_reconstructor.hpp"
+#include "typemorph/pe/rich_header.hpp"
 #include "typemorph/dump/dump_fixer.hpp"
+#include "typemorph/crypto/crypto_scanner.hpp"
+#include "typemorph/crypto/aes_recovery.hpp"
+#include "typemorph/deobf/strings.hpp"
+#include "typemorph/deobf/unxorer.hpp"
+#include "typemorph/deobf/api_hash_resolver.hpp"
+#include "typemorph/deobf/opaque_predicates.hpp"
+#include "typemorph/deobf/cff_reconstructor.hpp"
+#include "typemorph/deobf/devirtualizer.hpp"
+#include "typemorph/rtti/rtti_analyzer.hpp"
+#include "typemorph/security/security_analyzer.hpp"
+#include "typemorph/abi/calling_convention.hpp"
 
 #include <string>
 #include <vector>
@@ -34,10 +49,12 @@ enum class DecompilerMode {
     csharp,
     c_source,
     rust_source,
+    go_source,
     dex_java,
     delphi_pascal,
     vb_source,
     autoit_script,
+    lua_source,
     vm_profile,
     unpack_summary,
     vfs_summary,
@@ -54,12 +71,31 @@ public:
     void open_file(const std::string& path);
     void deobfuscate_current();
     void set_mode(DecompilerMode mode);
+
+    // Analysis & Protection
     void run_detection();
     void run_vm_analysis();
     void run_unpack();
     void run_vfs_extract();
     void run_iat_fix();
     void run_memdump_fix();
+    void run_checksec();
+    void run_rich_header();
+    void run_abi_classifier();
+
+    // Forensics & Cryptography
+    void run_crypto_scanner();
+    void run_aes_recovery();
+    void run_entropy_analysis();
+    void run_string_revealer();
+
+    // Deobfuscation & Advanced Reversing
+    void run_unxorer();
+    void run_apihash_scan();
+    void run_opaque_predicates();
+    void run_cff_reconstruction();
+    void run_classinformer();
+    void run_sigmaker();
 
 private:
     std::string current_file_;
@@ -71,6 +107,8 @@ private:
     dex::DexReport dex_report_;
     vb::VbReport vb_report_;
     autoit::AutoItReport autoit_report_;
+    lua::LuaDecompileReport lua_report_;
+    golang::GoAnalysisReport go_report_;
     unpack::VfsContainerReport vfs_report_;
     unpack::UnpackTarget unpack_target_;
     vm::VmProfileReport vm_report_;
