@@ -119,11 +119,14 @@ const EpSignatureRule kEpRules[] = {
      "55 8B EC 6A FF 68 ?? ?? ?? ?? 68 ?? ?? ?? ?? 64 A1 00 00 00 00 50 64 89 25 00 00 00 00 83 EC 60",
      "Armadillo Software Passport wrapper startup"},
 
-    // --- Microsoft Visual C/C++ ---
-    {DetectionCategory::compiler, "Microsoft Visual C/C++", "2015-2022 (x64)", 0.98,
+    // --- Microsoft Visual C/C++ & Clang-cl ---
+    {DetectionCategory::compiler, "Microsoft Visual C/C++", "2015-2026 (x64)", 0.98,
      "48 83 EC 28 E8 ?? ?? ?? ?? 48 83 C4 28 E9 ?? ?? ?? ??",
      "MSVC x64 CRT startup (sub rsp, 28h; call init; add rsp, 28h; jmp mainCRTStartup)"},
-    {DetectionCategory::compiler, "Microsoft Visual C/C++", "2015-2022 (x86)", 0.98,
+    {DetectionCategory::compiler, "Clang / LLVM (clang-cl)", "15.x - 22.x (x64)", 0.98,
+     "48 89 4C 24 08 48 83 EC 28 E8 ?? ?? ?? ?? 48 83 C4 28 C3",
+     "Clang / LLVM x64 Windows CRT startup thunk (mov [rsp+8], rcx; sub rsp, 28h; call; add rsp, 28h; ret)"},
+    {DetectionCategory::compiler, "Microsoft Visual C/C++", "2015-2026 (x86)", 0.98,
      "E8 ?? ?? ?? ?? E9 ?? ?? ?? ??",
      "MSVC x86 standard CRT jump entry thunk"},
     {DetectionCategory::compiler, "Microsoft Visual C/C++", "2005-2013 (x86)", 0.95,

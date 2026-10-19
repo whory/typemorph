@@ -29,6 +29,19 @@
       }
     },
     {
+      "name": "windows-clang",
+      "displayName": "Windows x64 (Clang / LLVM via ClangCL)",
+      "description": "Multi-config MSBuild with LLVM Clang-cl toolset.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "toolset": "ClangCL",
+      "binaryDir": "${sourceDir}/build/clang",
+      "cacheVariables": {
+        "TYPEMORPH_BUILD_TESTS": "ON",
+        "TYPEMORPH_FETCH_DEPS": "OFF"
+      }
+    },
+    {
       "name": "unix-release",
       "displayName": "Unix Release (Ninja)",
       "generator": "Ninja",
@@ -52,6 +65,16 @@
       "configuration": "Release"
     },
     {
+      "name": "windows-clang-debug",
+      "configurePreset": "windows-clang",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-clang-release",
+      "configurePreset": "windows-clang",
+      "configuration": "Release"
+    },
+    {
       "name": "unix-release",
       "configurePreset": "unix-release"
     }
@@ -60,6 +83,14 @@
     {
       "name": "windows-vs2026-debug",
       "configurePreset": "windows-vs2026",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-clang-debug",
+      "configurePreset": "windows-clang",
       "configuration": "Debug",
       "output": {
         "outputOnFailure": true

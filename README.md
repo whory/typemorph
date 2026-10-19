@@ -87,6 +87,17 @@ If CMake is not on PATH, use the copy shipped with Visual Studio:
 "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --preset windows-vs2026
 ```
 
+### Windows (Clang / LLVM)
+
+TypeMorph natively supports compilation via LLVM Clang (`clang-cl`):
+
+```bat
+cmake --preset windows-clang
+cmake --build --preset windows-clang-debug
+ctest --preset windows-clang-debug
+build\clang\Debug\typemorph.exe --help
+```
+
 ### Linux / macOS
 
 
