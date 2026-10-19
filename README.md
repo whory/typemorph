@@ -32,6 +32,7 @@ Ghidra/IDA/editor integration.
   size deltas (`Δsize / Δcount` = element stride), finds invariant magic with
   bitwise masking, tags monotonic sequences as timestamps/IDs, and infers **bitfield flag sets**
   via power-of-two and bit-gap analysis.
+- **Deep Compiler, Packer & Protection Identifier (`typemorph detect` / DIE Engine)** — deep identification of compilers (MSVC, GCC/MinGW, Clang, Delphi, FreePascal, Rust, Go), packers & protectors (UPX, ASPack, PECompact, VMProtect, Themida/WinLicense, Enigma, Armadillo, ConfuserEx, SmartAssembly, .NET Reactor, Spoon Studio), installers (Inno Setup, NSIS, PyInstaller), and runtime engines (AutoIt, .NET CLR) via entry point pattern matching and header metadata.
 - **C / C++ Struct Memory Layout Inferrer & Structured Decompiler (`typemorph decompile`)** — infers struct fields, offsets, alignments, and padding from memory displacement operands (`[reg + disp]`, 8-bit/32-bit displacements, float/double SSE accesses) and decompiles basic blocks into structured C pseudocode (`if`, conditional branches, calls, arithmetic, returns).
 - **C# (.NET / CLR) Metadata Engine & Code Decompiler (`typemorph csharp`)** — pure C++20 PE COM descriptor and ECMA-335 CLI metadata parser. Decodes `BSJB` metadata root, `#Strings`, `#Blob`, and `#~` tables (`TypeDef`, `MethodDef`, `Field`, `TypeRef`), reconstructing formatted and compilable C# source code.
 - **Rust High-Level Source Code Reconstructor (`typemorph decompile --lang=rust`)** — synthesizes recovered trait-object vtables, niche-encoded enums, tagged unions, and demangled symbols into idiomatic, compilable Rust module source files (`.rs`).
@@ -158,6 +159,10 @@ typemorph opaque obfuscated.exe
 # Reconstruct C++ RTTI class hierarchy, vftables, and emit C++ header
 typemorph rtti target.exe
 typemorph rtti target.exe --format=cpp
+
+# Deep compiler, packer, and protection detection (DIE Engine)
+typemorph detect target.exe
+typemorph detect target.exe --json
 
 # Inspect binary hardening mitigations (ASLR, DEP, CFG, CET, SafeSEH, RELRO), packers & anomalies
 typemorph checksec target.exe

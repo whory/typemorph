@@ -350,7 +350,22 @@ class R2Sync:
                 if rva:
                     self.cmd(f"f dotnet.{t.get('name')}.{m.get('name')} = {rva}")
 
+    def sync_detect(self) -> None:
+        """Deep compiler, packer and protection identification (DIE Engine)."""
+        print(f"[TypeMorph R2] Detecting compiler & packers (DIE Engine): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "detect", self.target_path)
+        if not data:
+            return
+        compiler = data.get("primary_compiler", "Unknown")
+        packer = data.get("primary_packer", "None")
+        protector = data.get("primary_protector", "None")
+        print(f"[TypeMorph R2] Compiler: {compiler} | Packer: {packer} | Protector: {protector}")
+        ep = data.get("entry_point", 0)
+        if ep:
+            self.cmd(f'CC "[TypeMorph Detect] {compiler} / {packer} / {protector}" @ {ep}')
+
     def run_all(self) -> None:
+        self.sync_detect()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()

@@ -456,7 +456,24 @@ class GhidraSync:
                         addr = toAddr(currentProgram.getImageBase().getOffset() + rva)
                         createLabel(addr, f"dotnet__{t.get('name')}__{m.get('name')}", True)
 
+    def sync_detect(self) -> None:
+        """Deep compiler, packer and protection identification (DIE Engine)."""
+        print(f"[TypeMorph Ghidra] Detecting compiler & packers (DIE Engine): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "detect", self.target_path)
+        if not data:
+            return
+        compiler = data.get("primary_compiler", "Unknown")
+        packer = data.get("primary_packer", "None")
+        protector = data.get("primary_protector", "None")
+        print(f"[TypeMorph Ghidra] Compiler: {compiler} | Packer: {packer} | Protector: {protector}")
+        if IN_GHIDRA:
+            ep = data.get("entry_point", 0)
+            if ep:
+                addr = toAddr(ep)
+                setPlateComment(addr, f"[TypeMorph Detect]\nCompiler: {compiler}\nPacker: {packer}\nProtector: {protector}")
+
     def run_all(self) -> None:
+        self.sync_detect()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()

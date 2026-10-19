@@ -31,6 +31,7 @@
 #include "typemorph/dotnet/dotnet_analyzer.hpp"
 #include "typemorph/decompile/c_decompiler.hpp"
 #include "typemorph/derust/rust_source.hpp"
+#include "typemorph/detect/detect_engine.hpp"
 #include "typemorph/tui/dashboard.hpp"
 
 #include <algorithm>
@@ -676,6 +677,10 @@ std::string command_help(std::string_view command) {
         return "Usage: typemorph decompile <binary> [--function=VA] [--lang=c|rust] [--out=FILE] [--json]\n"
                "Decompile machine code into structured C pseudocode, infer struct layouts, or reconstruct Rust code.\n";
     }
+    if (command == "detect" || command == "die") {
+        return "Usage: typemorph detect <binary> [--json]\n"
+               "Deep compiler, linker, packer, protector, and installer detection (DIE Engine style).\n";
+    }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
                "Line-delimited JSON-RPC 2.0 daemon for Ghidra/IDA/editor integration.\n";
@@ -687,6 +692,7 @@ std::string command_help(std::string_view command) {
            "  rust <binary>        Rust semantic recovery\n"
            "  decompile <binary>   Structured C / Rust decompiler & struct layout reconstructor\n"
            "  csharp <binary>      .NET / CLR assembly metadata extractor & C# code decompiler\n"
+           "  detect <binary>      Deep compiler, packer & protection identifier (DIE engine)\n"
            "  hybrid <binary>      Infer an embedded executable section\n"
            "  unxor <file>         XOR key discovery and deobfuscation\n"
            "  strings <file>       String revealer (ASCII, UTF-16, stack, XOR, base64)\n"
@@ -2967,6 +2973,62 @@ int command_decompile(const Arguments& args, std::ostream& out, std::ostream& er
     return 0;
 }
 
+JsonValue detect_report_to_json(const std::string& path, const detect::DetectionReport& rep) {
+    JsonValue doc = JsonValue::object();
+    doc["file"] = JsonValue(path);
+    doc["format"] = JsonValue(std::string(core::to_string(rep.format)));
+    doc["bits"] = JsonValue(static_cast<std::uint64_t>(rep.bits));
+    doc["arch"] = JsonValue(rep.arch);
+    doc["entry_point"] = JsonValue(rep.entry_point);
+    doc["entry_point_file_offset"] = JsonValue(rep.entry_point_file_offset);
+    doc["is_packed"] = JsonValue(rep.is_packed());
+    doc["primary_compiler"] = JsonValue(rep.primary_compiler);
+    doc["primary_packer"] = JsonValue(rep.primary_packer);
+    doc["primary_protector"] = JsonValue(rep.primary_protector);
+    doc["primary_runtime"] = JsonValue(rep.primary_runtime);
+
+    JsonValue matches = JsonValue::array();
+    for (const auto& m : rep.matches) {
+        JsonValue item = JsonValue::object();
+        item["category"] = JsonValue(std::string(detect::to_string(m.category)));
+        item["name"] = JsonValue(m.name);
+        item["version"] = JsonValue(m.version);
+        item["confidence"] = JsonValue(m.confidence);
+        item["rationale"] = JsonValue(m.rationale);
+        item["matched_offset"] = JsonValue(m.matched_offset);
+        matches.push(std::move(item));
+    }
+    doc["matches"] = std::move(matches);
+    return doc;
+}
+
+int command_detect(const Arguments& args, std::ostream& out, std::ostream& err) {
+    if (args.has("help") || args.positional.empty()) {
+        out << command_help("detect");
+        return 0;
+    }
+
+    const std::string& path = args.positional[0];
+    auto view = BinaryView::open(path);
+    if (!view) {
+        err << "typemorph detect: " << format_error(view.error()) << '\n';
+        return 1;
+    }
+
+    detect::DetectorEngine engine;
+    auto img_res = core::ExecutableImage::parse(view.value());
+    auto rep = img_res ? engine.detect(img_res.value()) : engine.detect_view(view.value());
+
+    if (args.has("json")) {
+        auto doc = detect_report_to_json(path, rep);
+        out << doc.dump(2) << '\n';
+        return 0;
+    }
+
+    out << detect::DetectorEngine::to_text_summary(rep);
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC
 // ---------------------------------------------------------------------------
@@ -3693,6 +3755,17 @@ Result<JsonValue> rpc_dispatch(const std::string& method, const JsonValue& param
         auto rep = decompiler.decompile(image_res.value(), target_va);
         return decompile_report_to_json(file.value(), rep);
     }
+    if (method == "detect" || method == "typemorph.detect" ||
+        method == "die" || method == "typemorph.die") {
+        auto file = json_string_field(params, "file");
+        if (!file) return file.error();
+        auto view_result = BinaryView::open(file.value());
+        if (!view_result) return view_result.error();
+        detect::DetectorEngine engine;
+        auto img_res = core::ExecutableImage::parse(view_result.value());
+        auto rep = img_res ? engine.detect(img_res.value()) : engine.detect_view(view_result.value());
+        return detect_report_to_json(file.value(), rep);
+    }
     err << "TypeMorph: unknown JSON-RPC method " << method << '\n';
     return make_error(ErrorCode::not_found, "unknown method: " + method);
 }
@@ -4002,6 +4075,16 @@ int Application::run(std::span<const std::string_view> args) {
             return 2;
         }
         return command_decompile(parsed.value(), out_, err_);
+    }
+    if (command == "detect" || command == "die") {
+        auto parsed = parse_arguments(
+            rest, {},
+            {}, 1, 1);
+        if (!parsed) {
+            err_ << usage_error(parsed.error().message) << '\n';
+            return 2;
+        }
+        return command_detect(parsed.value(), out_, err_);
     }
 
     err_ << "TypeMorph: unknown command '" << command << "'\nTry 'typemorph help'.\n";

@@ -411,7 +411,24 @@ class TypeMorphIdaSync:
                         ea = ida_nalt.get_imagebase() + rva
                         ida_name.set_name(ea, f"dotnet__{t.get('name')}__{m.get('name')}", ida_name.SN_NOWARN)
 
+    def sync_detect(self) -> None:
+        """Deep compiler, packer and protection identification (DIE Engine)."""
+        print(f"[TypeMorph IDA] Detecting compiler & packers (DIE Engine): {self.target_path}")
+        data = run_typemorph_command(self.typemorph_bin, "detect", self.target_path)
+        if not data:
+            return
+        compiler = data.get("primary_compiler", "Unknown")
+        packer = data.get("primary_packer", "None")
+        protector = data.get("primary_protector", "None")
+        print(f"[TypeMorph IDA] Compiler: {compiler} | Packer: {packer} | Protector: {protector}")
+        if IN_IDA:
+            info_cmt = f"TypeMorph Detect: Compiler={compiler}, Packer={packer}, Protector={protector}"
+            ep = data.get("entry_point", 0)
+            if ep:
+                ida_bytes.set_cmt(ep, info_cmt, False)
+
     def run_all(self) -> None:
+        self.sync_detect()
         self.sync_rust()
         self.sync_strings()
         self.sync_devirt()

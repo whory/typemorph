@@ -153,6 +153,10 @@ Confidence is a product of independent evidence; the CLI's
    - Recovers Go struct types, field offsets, types, and tags from runtime memory descriptors.
    - Recovers interface tables (`itabs`) mapping interface methods to concrete function pointers.
    - Emits complete, compilable Go source code with interfaces, structs, method sets, and implementations (`typemorph go --source`).
+20. **Deep Compiler, Packer & Protection Identifier (`typemorph::detect::DetectorEngine`)**:
+   - Implements DIE-style (Detect It Easy) heuristic and signature pattern matching against binary entry point opcodes.
+   - Identifies major compilers (MSVC, GCC, Clang, Delphi, FreePascal, Rust, Go), packers (UPX, ASPack, PECompact, Spoon Studio), protectors (VMProtect, Themida, Enigma, Armadillo, ConfuserEx, SmartAssembly, .NET Reactor), and installers (Inno Setup, NSIS, PyInstaller).
+   - Correlates PE Rich headers, .NET CLI metadata headers, and section markers to provide a high-confidence forensic verdict (`typemorph detect`).
 
 ## Emitters
 
