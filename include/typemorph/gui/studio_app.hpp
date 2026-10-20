@@ -113,6 +113,13 @@ public:
     void run_applycalletype();
     void save_decompiled_output();
 
+    // dnSpy Native Inspection & Tool Windows
+    void run_search();
+    void run_hex_view();
+    void run_bookmarks();
+    void run_disassembly_view();
+    void run_il_instruction_inspector();
+
     void populate_tree(const core::BinaryView& view);
 
 private:
