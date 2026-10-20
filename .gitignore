@@ -13,6 +13,7 @@ compile_commands.json
 *.sln
 *.slnx
 .vs/
+/thirdparty/
 
 # Test/analysis artifacts
 /tests/fixtures/generated/

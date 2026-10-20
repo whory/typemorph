@@ -1,4 +1,4 @@
-// TypeMorph - Standalone Native Desktop GUI Application (dnSpy / dotPeek style)
+// TypeMorph - Standalone Native Desktop GUI Application 
 //
 // Pure C++20 Win32 native implementation:
 // - Left pane: Hierarchical Explorer TreeView (Assemblies, Delphi Forms, DEX Packages, Functions, Strings, Classes, Handlers)
@@ -139,7 +139,7 @@ private:
     bool is_deobfuscated_ = false;
 };
 
-// Global entry point for launching the native dnSpy-style GUI
+// Global entry point for launching the native desktop Studio GUI
 int run_native_studio(int argc, char** argv);
 
 }  // namespace typemorph::gui

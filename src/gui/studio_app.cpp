@@ -1,4 +1,4 @@
-// TypeMorph - Standalone Native Desktop GUI Application Implementation (dnSpy / dotPeek style)
+// TypeMorph - Standalone Native Desktop GUI Application Implementation
 #ifdef _WIN32
 
 #include "typemorph/gui/studio_app.hpp"
@@ -82,10 +82,16 @@ constexpr int IDC_CODE_EDITOR        = 2002;
 constexpr int IDC_LOG_LIST           = 2003;
 constexpr int IDC_STATUS_BAR         = 2004;
 
-constexpr COLORREF kClrDarkBg        = RGB(30, 30, 30);
-constexpr COLORREF kClrTreeBg        = RGB(37, 37, 38);
-constexpr COLORREF kClrText          = RGB(212, 212, 212);
-constexpr COLORREF kClrHeader        = RGB(45, 45, 48);
+constexpr COLORREF kClrDarkBg        = RGB(30, 30, 30);      // dnSpy main background #1E1E1E
+constexpr COLORREF kClrTreeBg        = RGB(37, 37, 38);      // dnSpy treeview #252526
+constexpr COLORREF kClrText          = RGB(241, 241, 241);   // dnSpy foreground text #F1F1F1
+constexpr COLORREF kClrHeader        = RGB(45, 45, 48);      // dnSpy toolbar / header #2D2D30
+constexpr COLORREF kClrBtnNormal     = RGB(45, 45, 48);      // dnSpy button normal #2D2D30
+constexpr COLORREF kClrBtnHover      = RGB(62, 62, 64);      // dnSpy button hover #3E3E40
+constexpr COLORREF kClrBtnPressed    = RGB(80, 80, 80);      // dnSpy button pressed #505050
+constexpr COLORREF kClrBtnBorder     = RGB(62, 62, 64);      // dnSpy button border #3E3E40
+constexpr COLORREF kClrStatusBg      = RGB(0, 122, 204);     // dnSpy status bar accent #007ACC
+constexpr COLORREF kClrStatusText    = RGB(255, 255, 255);   // dnSpy status bar text #FFFFFF
 
 HWND g_hwndMain   = nullptr;
 HWND g_hwndTree   = nullptr;
@@ -238,9 +244,28 @@ inline void SafeDragFinish(HDROP hDrop) {
     }
 }
 
+
+inline void EnableImmersiveDarkMode(HWND hwnd) {
+    HMODULE hDwm = LoadLibraryA("dwmapi.dll");
+    if (hDwm) {
+        typedef HRESULT (WINAPI* pfnDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+        auto pDwmSet = reinterpret_cast<pfnDwmSetWindowAttribute>(GetProcAddress(hDwm, "DwmSetWindowAttribute"));
+        if (pDwmSet) {
+            BOOL darkMode = TRUE;
+            // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Windows 10 20H1+ and Windows 11)
+            // Fallback: 19 for Windows 10 1809 - 1909
+            if (FAILED(pDwmSet(hwnd, 20, &darkMode, sizeof(darkMode)))) {
+                pDwmSet(hwnd, 19, &darkMode, sizeof(darkMode));
+            }
+        }
+        FreeLibrary(hDwm);
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
+        EnableImmersiveDarkMode(hwnd);
         INITCOMMONCONTROLSEX icex = {sizeof(icex), ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES};
         InitCommonControlsEx(&icex);
 
@@ -289,7 +314,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         for (const auto& btn : kToolBtns) {
             HWND hBtn = CreateWindowExW(
                 0, L"BUTTON", btn.label,
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                 0, 0, btn.width, 24, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(btn.id)),
                 GetModuleHandleW(nullptr), nullptr);
@@ -309,13 +334,58 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         int parts[] = {360, 720, -1};
         SendMessageW(g_hwndStatus, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
+        SendMessageW(g_hwndStatus, SB_SETBKCOLOR, 0, static_cast<LPARAM>(kClrDarkBg));
         SetStatusBarText(0, "Ready - TypeMorph Decompiler Studio");
-        SetStatusBarText(1, "dnSpy / dotPeek Architecture");
+        SetStatusBarText(1, "TypeMorph Semantic Engine");
         SetStatusBarText(2, "TypeMorph v0.7.0 C++20");
 
         LogMessage("// TypeMorph Studio native Win32 desktop UI initialized.");
         LogMessage("// Drag-and-drop or Open any PE64, ELF, Mach-O, .NET, DEX, Delphi or VMProtect binary.");
         return 0;
+    }
+
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, g_hBrushDark);
+        return 1;
+    }
+
+    case WM_DRAWITEM: {
+        auto* pDis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+        if (pDis && pDis->CtlType == ODT_BUTTON) {
+            bool is_pressed = (pDis->itemState & ODS_SELECTED) != 0;
+            bool is_disabled = (pDis->itemState & ODS_DISABLED) != 0;
+            bool is_focused = (pDis->itemState & ODS_FOCUS) != 0;
+
+            COLORREF bg = is_pressed ? kClrBtnPressed : (is_focused ? kClrBtnHover : kClrBtnNormal);
+            HBRUSH hBgBrush = CreateSolidBrush(bg);
+            FillRect(pDis->hDC, &pDis->rcItem, hBgBrush);
+            DeleteObject(hBgBrush);
+
+            HPEN hPen = CreatePen(PS_SOLID, 1, kClrBtnBorder);
+            HGDIOBJ hOldPen = SelectObject(pDis->hDC, hPen);
+            HGDIOBJ hOldBrush = SelectObject(pDis->hDC, GetStockObject(NULL_BRUSH));
+            Rectangle(pDis->hDC, pDis->rcItem.left, pDis->rcItem.top, pDis->rcItem.right, pDis->rcItem.bottom);
+            SelectObject(pDis->hDC, hOldBrush);
+            SelectObject(pDis->hDC, hOldPen);
+            DeleteObject(hPen);
+
+            wchar_t btn_text[128] = L"";
+            GetWindowTextW(pDis->hwndItem, btn_text, 128);
+            SetBkMode(pDis->hDC, TRANSPARENT);
+            SetTextColor(pDis->hDC, is_disabled ? RGB(100, 100, 100) : kClrText);
+            HGDIOBJ hOldFont = SelectObject(pDis->hDC, g_hFontUI);
+            RECT rcText = pDis->rcItem;
+            if (is_pressed) {
+                OffsetRect(&rcText, 1, 1);
+            }
+            DrawTextW(pDis->hDC, btn_text, -1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(pDis->hDC, hOldFont);
+            return TRUE;
+        }
+        break;
     }
 
     case WM_DROPFILES: {
@@ -2620,7 +2690,7 @@ int StudioApp::run(const std::string& initial_file) {
 
     g_hwndMain = CreateWindowExW(
         0, L"TypeMorphStudioClass",
-        L"TypeMorph Studio - Multi-Language Decompiler & Deobfuscator (dnSpy / dotPeek Architecture)",
+        L"TypeMorph Studio - Multi-Language Decompiler & Semantic Analyzer",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 1200, 750,
         nullptr, nullptr, hInstance, nullptr);

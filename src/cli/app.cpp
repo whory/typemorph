@@ -762,7 +762,7 @@ std::string command_help(std::string_view command) {
     }
     if (command == "studio" || command == "gui" || command == "dnspy") {
         return "Usage: typemorph studio [assembly.exe]\n"
-               "Launch standalone native desktop decompiler & deobfuscator GUI (dnSpy / dotPeek style).\n";
+               "Launch standalone native desktop decompiler & deobfuscator GUI (modern reverse engineering studio style).\n";
     }
     if (command == "serve") {
         return "Usage: typemorph serve --stdio\n"
@@ -770,7 +770,7 @@ std::string command_help(std::string_view command) {
     }
     return "TypeMorph - binary structure inference, Rust recovery & deobfuscation.\n\n"
            "Commands:\n"
-           "  studio [assembly]    Launch native desktop GUI decompiler (dnSpy / dotPeek architecture)\n"
+           "  studio [assembly]    Launch native desktop GUI decompiler (decompiler and analyzer architecture)\n"
            "  inspect <file>       Interactive TUI dashboard\n"
            "  infer <samples...>   Differential format inference\n"
            "  rust <binary>        Rust semantic recovery\n"
@@ -951,7 +951,7 @@ int command_inspect(const Arguments& args, std::ostream& out, std::ostream& err)
     }
 
     if (args.has("html")) {
-        // Read the dnSpy / dotPeek UI template and output it or write to file
+        // Read the HTML Studio UI template and output it or write to file
         const std::string template_path = "C:/Users/dev_null/.gemini/antigravity/brain/57049001-375c-4ba4-9c66-51b42c51d0e2/dnspy_studio.html";
         std::ifstream file(template_path);
         if (file) {
@@ -962,7 +962,7 @@ int command_inspect(const Arguments& args, std::ostream& out, std::ostream& err)
                     err << "TypeMorph: failed to write HTML dashboard to " << *out_path << '\n';
                     return 1;
                 }
-                out << "TypeMorph dnSpy Studio UI exported to: " << *out_path << "\n";
+                out << "TypeMorph Studio UI exported to: " << *out_path << "\n";
                 return 0;
             }
             out << content;

@@ -380,7 +380,7 @@ TEST_CASE("cli: aes-recovery analyzes binary for AES artifacts") {
 TEST_CASE("cli: studio displays help") {
     const auto help_res = invoke({"studio", "--help"});
     CHECK_EQ(help_res.exit_code, 0);
-    CHECK(help_res.out.find("dnSpy") != std::string::npos);
+    CHECK(help_res.out.find("studio") != std::string::npos || help_res.out.find("desktop") != std::string::npos);
 }
 
 TEST_CASE("cli: delphi displays help") {
